@@ -1,0 +1,1 @@
+-- Tests provide users through UserCredentialReader.
