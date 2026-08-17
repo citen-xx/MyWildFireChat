@@ -1,0 +1,31 @@
+spring:
+  application:
+    name: my-wildfire-chat
+  datasource:
+    url: jdbc:mysql://${IM_MYSQL_HOST:localhost}:${IM_MYSQL_PORT:3307}/${IM_MYSQL_DATABASE:im_demo}?useSSL=false&serverTimezone=UTC&characterEncoding=utf8
+    username: ${IM_MYSQL_USERNAME:root}
+    password: ${IM_MYSQL_PASSWORD:root}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${IM_REDIS_HOST:localhost}
+      port: ${IM_REDIS_PORT:6380}
+      password: ${IM_REDIS_PASSWORD:}
+
+server:
+  port: ${IM_HTTP_PORT:8080}
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  mapper-locations: classpath*:/mapper/**/*.xml
+
+im:
+  netty:
+    host: ${IM_NETTY_HOST:0.0.0.0}
+    port: ${IM_NETTY_PORT:9000}
+    boss-threads: 1
+    worker-threads: 0
+    max-frame-length: 1048576
+    reader-idle-seconds: 60
+    keep-alive: true

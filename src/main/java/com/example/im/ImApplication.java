@@ -1,0 +1,15 @@
+package com.example.im;
+
+import com.example.im.netty.server.NettyProperties;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+
+@SpringBootApplication
+@EnableConfigurationProperties(NettyProperties.class)
+public class ImApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(ImApplication.class, args);
+    }
+}

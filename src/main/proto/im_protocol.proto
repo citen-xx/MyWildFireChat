@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package com.example.im.protocol;
+
+option java_package = "com.example.im.netty.protocol";
+option java_outer_classname = "ImProtocol";
+option java_multiple_files = false;
+
+message MessageEnvelope {
+  enum MessageType {
+    MESSAGE_TYPE_UNSPECIFIED = 0;
+    CONNECT = 1;
+    CONNECT_ACK = 2;
+    PING = 3;
+    PONG = 4;
+    SEND_MESSAGE = 5;
+    MESSAGE_ACK = 6;
+    SYNC_REQUEST = 7;
+    SYNC_RESPONSE = 8;
+    ERROR = 9;
+  }
+
+  MessageType message_type = 1;
+  string request_id = 2;
+  int64 timestamp = 3;
+  bytes payload = 4;
+}
