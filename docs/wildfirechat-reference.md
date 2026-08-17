@@ -31,3 +31,18 @@ The reference checkout contains Apache License 2.0 and Eclipse Public License
 `LICENSE` file. This project does not reuse any reference implementation file,
 so no WildfireChat source license is being incorporated into the implementation.
 Only general architecture observations are documented above.
+
+## Phase 2 applied notes
+
+- WildfireChat uses Netty pipeline handlers to decode protocol frames, process
+  CONNECT-like state transitions, and clean resources on channel inactivity.
+  This project keeps that idea, but uses a self-defined length-prefixed Protobuf
+  `MessageEnvelope` instead of the original MQTT protocol and classes.
+- WildfireChat keeps connection descriptors in concurrent structures and handles
+  duplicate client connection replacement. This project uses
+  `SessionKey(userId, deviceId)` with two maps: one for live channel lookup and
+  one for channel-to-session cleanup. The code is newly written and scoped to
+  device-level sessions only.
+- WildfireChat closes idle channels through a Netty idle timeout handler. This
+  project uses Netty `IdleStateHandler` plus a small `HeartbeatHandler` that
+  responds to `PING` with `PONG` and closes reader-idle channels.

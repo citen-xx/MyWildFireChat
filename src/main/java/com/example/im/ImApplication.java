@@ -1,12 +1,13 @@
 package com.example.im;
 
+import com.example.im.auth.security.JwtProperties;
 import com.example.im.netty.server.NettyProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 @SpringBootApplication
-@EnableConfigurationProperties(NettyProperties.class)
+@EnableConfigurationProperties({NettyProperties.class, JwtProperties.class})
 public class ImApplication {
 
     public static void main(String[] args) {

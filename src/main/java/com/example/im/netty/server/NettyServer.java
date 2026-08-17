@@ -88,6 +88,13 @@ public class NettyServer implements SmartLifecycle {
         return running.get();
     }
 
+    public int boundPort() {
+        if (serverChannel == null || serverChannel.localAddress() == null) {
+            return -1;
+        }
+        return ((java.net.InetSocketAddress) serverChannel.localAddress()).getPort();
+    }
+
     @Override
     public int getPhase() {
         return Integer.MAX_VALUE;

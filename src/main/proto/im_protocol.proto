@@ -25,3 +25,19 @@ message MessageEnvelope {
   int64 timestamp = 3;
   bytes payload = 4;
 }
+
+message ConnectRequest {
+  string token = 1;
+  string device_id = 2;
+}
+
+message ConnectAck {
+  int64 user_id = 1;
+  string device_id = 2;
+  int64 server_time = 3;
+}
+
+message ErrorPayload {
+  string code = 1;
+  string message = 2;
+}

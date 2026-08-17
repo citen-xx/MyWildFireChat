@@ -6,6 +6,11 @@ spring:
     username: ${IM_MYSQL_USERNAME:root}
     password: ${IM_MYSQL_PASSWORD:root}
     driver-class-name: com.mysql.cj.jdbc.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema.sql
+      data-locations: classpath:db/data.sql
   data:
     redis:
       host: ${IM_REDIS_HOST:localhost}
@@ -21,6 +26,10 @@ mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
 
 im:
+  jwt:
+    issuer: my-wildfire-chat
+    secret: ${IM_JWT_SECRET:change-this-development-secret-change-this-development-secret}
+    ttl-seconds: 7200
   netty:
     host: ${IM_NETTY_HOST:0.0.0.0}
     port: ${IM_NETTY_PORT:9000}

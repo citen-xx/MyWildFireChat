@@ -3,6 +3,7 @@ package com.example.im.netty.server;
 import com.example.im.netty.handler.AuthHandler;
 import com.example.im.netty.handler.HeartbeatHandler;
 import com.example.im.netty.handler.MessageHandler;
+import com.example.im.netty.handler.SessionCleanupHandler;
 import com.example.im.netty.protocol.ImProtocol.MessageEnvelope;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
@@ -23,16 +24,19 @@ public class NettyServerInitializer extends ChannelInitializer<SocketChannel> {
     private final AuthHandler authHandler;
     private final HeartbeatHandler heartbeatHandler;
     private final MessageHandler messageHandler;
+    private final SessionCleanupHandler sessionCleanupHandler;
 
     public NettyServerInitializer(
             NettyProperties properties,
             AuthHandler authHandler,
             HeartbeatHandler heartbeatHandler,
-            MessageHandler messageHandler) {
+            MessageHandler messageHandler,
+            SessionCleanupHandler sessionCleanupHandler) {
         this.properties = properties;
         this.authHandler = authHandler;
         this.heartbeatHandler = heartbeatHandler;
         this.messageHandler = messageHandler;
+        this.sessionCleanupHandler = sessionCleanupHandler;
     }
 
     @Override
@@ -48,5 +52,6 @@ public class NettyServerInitializer extends ChannelInitializer<SocketChannel> {
         pipeline.addLast("authHandler", authHandler);
         pipeline.addLast("heartbeatHandler", heartbeatHandler);
         pipeline.addLast("messageHandler", messageHandler);
+        pipeline.addLast("sessionCleanupHandler", sessionCleanupHandler);
     }
 }

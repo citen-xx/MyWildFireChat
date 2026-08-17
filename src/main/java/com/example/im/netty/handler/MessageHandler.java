@@ -21,8 +21,9 @@ public class MessageHandler extends SimpleChannelInboundHandler<MessageEnvelope>
     }
 
     @Override
-    public void channelInactive(ChannelHandlerContext context) {
+    public void channelInactive(ChannelHandlerContext context) throws Exception {
         log.debug("Netty channel inactive: {}", context.channel().id().asShortText());
+        super.channelInactive(context);
     }
 
     @Override
