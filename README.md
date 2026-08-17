@@ -6,8 +6,8 @@
 WildfireChat 的长连接、会话、投递和同步设计思想，但不复制其源码、
 包名、MQTT 协议或工程结构。
 
-当前已完成 Phase 3：在 Phase 2 基础上实现单聊、Conversation、MySQL
-消息持久化、`clientMessageId` 幂等、Conversation sequence 和在线设备推送。
+当前已完成 Phase 4：在 Phase 3 基础上实现接收方 `MESSAGE_ACK`、设备级
+Pending ACK、超时重投和客户端重复 Push 去重。
 
 ## Architecture
 
@@ -28,8 +28,8 @@ REST Client
   -> Application Service
 ```
 
-Phase 3 完成单节点单聊核心链路。接收方 ACK、消息重投、离线同步、Redis
-route、RabbitMQ 跨节点转发会在后续阶段逐步完成。
+Phase 4 完成单节点在线可靠投递。离线同步、Redis route、RabbitMQ 跨节点
+转发会在后续阶段逐步完成。
 
 ## 模块说明
 
@@ -80,7 +80,12 @@ com.example.im
 
 - `im:seq:{conversationId}`: Conversation sequence counter，Phase 3 使用 Redis `INCR`
 - `im:route:{userId}:{deviceId}`: online route with TTL
-- `im:pending_ack:{userId}:{deviceId}`: pending ACK messages
+- `im:pending_ack:{userId}:{deviceId}`: Redis ZSET，member 为 `messageId`，
+  score 为下一次重投时间戳
+- `im:pending_ack_attempt:{userId}:{deviceId}`: Redis Hash，field 为
+  `messageId`，value 为当前 retry attempt
+- `im:pending_ack:index`: Redis ZSET，全局扫描索引，member 为
+  `userId|base64url(deviceId)|base64url(messageId)`，score 为下一次重投时间戳
 
 ## RabbitMQ Exchange / Queue
 
@@ -119,8 +124,13 @@ Phase 3 已实现 payload：
 - `SendResult(clientMessageId, messageId, conversationId, sequence, createdAt)`
 - `PushMessage(messageId, clientMessageId, conversationId, sequence, senderId, receiverId, content, messageType, createdAt)`
 
+Phase 4 已实现 payload：
+
+- `MessageAck(messageId, conversationId, sequence)`
+
 `SendResult` 只表示服务端已经成功接收并持久化，不表示接收方已经收到。
-真正的消息投递 ACK 放到 Phase 4。
+`MessageAck` 表示接收方某个 `userId + deviceId` 连接已经收到并处理了
+`PUSH_MESSAGE`。
 
 TCP framing 使用 4 字节 length field，避免 TCP 粘包拆包问题。
 
@@ -251,9 +261,71 @@ Session 清理。
 
 ## ACK 机制
 
-TODO: Phase 4 实现。
+Phase 4 实现 Receiver ACK：
 
-目标语义是 At-Least-Once Delivery + `messageId` 去重，不宣称 Exactly Once。
+```text
+Server
+  -> PUSH_MESSAGE
+  -> Receiver Client
+  -> MESSAGE_ACK(messageId, conversationId, sequence)
+  -> AckService removes Pending ACK
+```
+
+`SEND_RESULT` 和 `MESSAGE_ACK` 是两种不同确认：
+
+- `SEND_RESULT`: 发送方 A 的消息已经被服务端持久化
+- `MESSAGE_ACK`: 接收方 B 的某个设备已经收到并完成客户端处理
+
+Pending ACK 是设备级别的。Bob 同时在线 `web` 和 `pc` 时，会分别记录：
+
+```text
+im:pending_ack:1002:web
+im:pending_ack:1002:pc
+```
+
+`web` ACK 只删除 `web` 的 pending，不代表 `pc` 已收到。
+
+ACK 删除天然幂等：重复 `MESSAGE_ACK(messageId)` 时，第一次删除 Pending ACK，
+后续删除不到记录也视为成功。
+
+## Message Delivery Semantics
+
+当前在线投递语义是 At-Least-Once Delivery，不是 Exactly Once。
+
+服务端向在线设备 Push 后写入 Redis Pending ACK。如果超时未收到 ACK，
+`AckRetryScheduler` 会在独立线程中扫描 `im:pending_ack:index`，根据
+`messageId` 回表读取 MySQL 消息，再推送给仍在线的同一设备。
+
+默认重试策略：
+
+```text
+initial push
+  -> 3s retry 1
+  -> 3s retry 2
+  -> 5s retry 3
+  -> stop online retry
+```
+
+停止在线重试不代表消息丢失，消息已经在 MySQL 中。Phase 5 会用
+Conversation Sequence 增量同步补偿断线和离线期间的消息。
+
+如果设备断开连接，调度器会删除该设备的 Pending ACK，停止即时重投，等待
+后续离线同步恢复。
+
+当前 Web 前端收到 `PUSH_MESSAGE` 后，先按 `messageId` 检查本地消息列表：
+
+- 未处理过：追加到页面消息状态
+- 已处理过：不重复展示
+- 两种情况都会继续发送 `MESSAGE_ACK`
+
+当前 ACK 语义代表“当前页面进程已经接收并处理”，不是“消息已经永久写入客户端磁盘”。
+后续如果引入 IndexedDB，再把 ACK 发送时机移动到本地持久化成功之后。
+
+调度器使用独立 `ScheduledExecutorService`，不会在 Netty EventLoop 中
+`sleep` 或阻塞等待 ACK。
+
+多 Worker 抢同一条 Redis due item 的严格 Claim Lock 尚未实现；当前项目仍是
+单节点在线投递。未来多节点阶段需要用 Lua 或短租约字段保证扫描任务的互斥领取。
 
 ## Sequence 机制
 
@@ -338,6 +410,7 @@ WebSocket JSON 协议：
 - `CONNECT_ACK`: WebSocket 鉴权成功
 - `SEND_RESULT`: 服务端已接收并持久化
 - `PUSH_MESSAGE`: 在线接收方收到推送
+- `MESSAGE_ACK`: 浏览器收到 `PUSH_MESSAGE` 后发回的接收方确认
 - `ERROR`: 协议或鉴权错误
 - `PONG`: 心跳响应
 
@@ -451,6 +524,13 @@ Phase 3 测试覆盖：
 - Bob 离线时消息仍然落库
 - Bob 多设备同时在线时每个设备都收到 Push
 - 未 CONNECT 的客户端无法发送消息
+- TCP 接收方 `MESSAGE_ACK` 后 Pending ACK 被删除
+- TCP ACK 丢失时服务端会超时重投，重投后 ACK 会停止继续重投
+- 重复 ACK 不报错
+- Bob 断线后停止在线重试
+- `SEND_RESULT` 与接收方 `MESSAGE_ACK` 语义独立
+- 同一用户多个 deviceId 独立维护 Pending ACK
+- WebSocket `MESSAGE_ACK` 复用同一套 ACK 服务
 
 ## 当前限制
 
@@ -458,13 +538,13 @@ Phase 3 测试覆盖：
 - 当前只实现单进程内存 Session，Redis route 还未实现
 - Phase 3 集成测试使用 H2 MySQL mode；生产运行配置仍使用 MySQL
 - Web 前端使用固定 Demo User List: Alice/Bob，不是好友系统
-- 未实现接收方 ACK、消息重投、离线同步
+- 已实现在线接收方 ACK 和有限重投，但未实现离线同步
 - 未实现群聊、多端同步、Redis route、RabbitMQ 跨节点转发
 - 当前 CLI 客户端尚未提供
+- Redis Pending ACK 的多 Worker Claim Lock 暂未实现，当前按单节点扫描器设计
 
 ## TODO
 
-- Phase 4: ACK、重复发送幂等、消息重投
 - Phase 5: 离线消息和 `SYNC_REQUEST`
 - Phase 6: 群聊
 - Phase 7: Redis route 和多节点启动

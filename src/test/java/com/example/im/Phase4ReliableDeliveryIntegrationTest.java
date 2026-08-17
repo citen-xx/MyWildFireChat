@@ -2,10 +2,11 @@ package com.example.im;
 
 import com.example.im.auth.service.LoginCommand;
 import com.example.im.auth.service.LoginResult;
+import com.example.im.message.ack.PendingAckRepository;
 import com.example.im.message.service.ConversationSequenceGenerator;
 import com.example.im.netty.protocol.ImProtocol.ConnectAck;
 import com.example.im.netty.protocol.ImProtocol.ConnectRequest;
-import com.example.im.netty.protocol.ImProtocol.ErrorPayload;
+import com.example.im.netty.protocol.ImProtocol.MessageAck;
 import com.example.im.netty.protocol.ImProtocol.MessageEnvelope;
 import com.example.im.netty.protocol.ImProtocol.PushMessage;
 import com.example.im.netty.protocol.ImProtocol.SendMessageRequest;
@@ -32,25 +33,20 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.client.standard.StandardWebSocketClient;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -67,8 +63,10 @@ import static org.awaitility.Awaitility.await;
                 "im.mybatis.enabled=true",
                 "im.sequence.redis-enabled=false",
                 "im.ack.redis-enabled=false",
-                "im.ack.retry-enabled=false",
-                "spring.datasource.url=jdbc:h2:mem:phase3;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
+                "im.ack.retry-enabled=true",
+                "im.ack.retry-delays-millis=150,150,200",
+                "im.ack.scan-interval-millis=50",
+                "spring.datasource.url=jdbc:h2:mem:phase4;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
                 "spring.datasource.driver-class-name=org.h2.Driver",
                 "spring.datasource.username=sa",
                 "spring.datasource.password=",
@@ -79,7 +77,7 @@ import static org.awaitility.Awaitility.await;
                         + "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration,"
                         + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration"
         })
-class Phase3SingleChatIntegrationTest {
+class Phase4ReliableDeliveryIntegrationTest {
 
     @Autowired
     private TestRestTemplate restTemplate;
@@ -97,10 +95,13 @@ class Phase3SingleChatIntegrationTest {
     private ObjectMapper objectMapper;
 
     @Autowired
-    private TestSequenceGenerator sequenceGenerator;
+    private PendingAckRepository pendingAckRepository;
 
     @Autowired
     private SessionManager sessionManager;
+
+    @Autowired
+    private TestSequenceGenerator sequenceGenerator;
 
     @BeforeEach
     void cleanDatabase() {
@@ -117,27 +118,25 @@ class Phase3SingleChatIntegrationTest {
     }
 
     @Test
-    void onlineSingleChatShouldPersistAndPushToReceiver() throws Exception {
+    void tcpAckShouldRemovePendingAckAndAllowDuplicateAck() throws Exception {
         EventLoopGroup group = new NioEventLoopGroup(2);
         try {
             ConnectedClient alice = connect(group, "alice", "alice-web");
             ConnectedClient bob = connect(group, "bob", "bob-web");
 
-            SendResult result = alice.sendMessage("cm-online-1", 1002L, "hello bob");
-            PushMessage push = PushMessage.parseFrom(bob.nextOfType(MessageEnvelope.MessageType.PUSH_MESSAGE).getPayload());
+            SendResult sendResult = alice.sendMessage("ack-tcp-1", 1002L, "need ack");
+            PushMessage push = PushMessage.parseFrom(
+                    bob.nextOfType(MessageEnvelope.MessageType.PUSH_MESSAGE).getPayload());
 
-            assertThat(result.getClientMessageId()).isEqualTo("cm-online-1");
-            assertThat(push.getMessageId()).isEqualTo(result.getMessageId());
-            assertThat(push.getSenderId()).isEqualTo(1001L);
-            assertThat(push.getReceiverId()).isEqualTo(1002L);
-            assertThat(push.getContent()).isEqualTo("hello bob");
+            assertThat(push.getMessageId()).isEqualTo(sendResult.getMessageId());
+            await().atMost(Duration.ofSeconds(1)).untilAsserted(() ->
+                    assertThat(pendingAckRepository.exists(1002L, "bob-web", push.getMessageId())).isTrue());
 
-            Integer count = jdbcTemplate.queryForObject("select count(*) from message", Integer.class);
-            Long senderId = jdbcTemplate.queryForObject("select sender_id from message where message_id = ?",
-                    Long.class,
-                    result.getMessageId());
-            assertThat(count).isEqualTo(1);
-            assertThat(senderId).isEqualTo(1001L);
+            bob.ack(push);
+            bob.ack(push);
+
+            await().atMost(Duration.ofSeconds(1)).untilAsserted(() ->
+                    assertThat(pendingAckRepository.exists(1002L, "bob-web", push.getMessageId())).isFalse());
 
             alice.close();
             bob.close();
@@ -147,117 +146,110 @@ class Phase3SingleChatIntegrationTest {
     }
 
     @Test
-    void duplicateClientMessageIdShouldReturnOriginalMessage() throws Exception {
-        EventLoopGroup group = new NioEventLoopGroup(1);
-        try {
-            ConnectedClient alice = connect(group, "alice", "alice-web");
-
-            SendResult first = alice.sendMessage("cm-duplicate", 1002L, "one");
-            SendResult second = alice.sendMessage("cm-duplicate", 1002L, "one");
-
-            Integer count = jdbcTemplate.queryForObject(
-                    "select count(*) from message where sender_id = 1001 and client_message_id = 'cm-duplicate'",
-                    Integer.class);
-            assertThat(count).isEqualTo(1);
-            assertThat(second.getMessageId()).isEqualTo(first.getMessageId());
-            assertThat(second.getSequence()).isEqualTo(first.getSequence());
-
-            alice.close();
-        } finally {
-            group.shutdownGracefully().syncUninterruptibly();
-        }
-    }
-
-    @Test
-    void concurrentOppositeFirstMessagesShouldCreateOneConversation() throws Exception {
+    void missingTcpAckShouldRetryAndStopAfterAck() throws Exception {
         EventLoopGroup group = new NioEventLoopGroup(2);
-        var executor = Executors.newFixedThreadPool(2);
         try {
             ConnectedClient alice = connect(group, "alice", "alice-web");
             ConnectedClient bob = connect(group, "bob", "bob-web");
 
-            CountDownLatch start = new CountDownLatch(1);
-            var aliceFuture = executor.submit(() -> {
-                start.await();
-                return alice.sendMessage("cm-a-to-b", 1002L, "from alice");
-            });
-            var bobFuture = executor.submit(() -> {
-                start.await();
-                return bob.sendMessage("cm-b-to-a", 1001L, "from bob");
-            });
-            start.countDown();
+            SendResult sendResult = alice.sendMessage("ack-retry-1", 1002L, "retry me");
+            PushMessage firstPush = PushMessage.parseFrom(
+                    bob.nextOfType(MessageEnvelope.MessageType.PUSH_MESSAGE).getPayload());
+            PushMessage retryPush = PushMessage.parseFrom(
+                    bob.nextOfType(MessageEnvelope.MessageType.PUSH_MESSAGE).getPayload());
 
-            SendResult aliceResult = aliceFuture.get(5, TimeUnit.SECONDS);
-            SendResult bobResult = bobFuture.get(5, TimeUnit.SECONDS);
+            assertThat(firstPush.getMessageId()).isEqualTo(sendResult.getMessageId());
+            assertThat(retryPush.getMessageId()).isEqualTo(firstPush.getMessageId());
 
-            Integer conversationCount = jdbcTemplate.queryForObject(
-                    "select count(*) from conversation where biz_key = 'single:1001:1002'",
-                    Integer.class);
-            Integer memberCount = jdbcTemplate.queryForObject("select count(*) from conversation_member", Integer.class);
-            List<Long> sequences = new ArrayList<>(List.of(aliceResult.getSequence(), bobResult.getSequence()));
-            sequences.sort(Comparator.naturalOrder());
+            bob.ack(retryPush);
 
-            assertThat(conversationCount).isEqualTo(1);
-            assertThat(memberCount).isEqualTo(2);
-            assertThat(aliceResult.getConversationId()).isEqualTo(bobResult.getConversationId());
-            assertThat(sequences).containsExactly(1L, 2L);
+            await().atMost(Duration.ofSeconds(1)).untilAsserted(() ->
+                    assertThat(pendingAckRepository.exists(1002L, "bob-web", retryPush.getMessageId())).isFalse());
+            assertThat(bob.pollOfType(MessageEnvelope.MessageType.PUSH_MESSAGE, Duration.ofMillis(350))).isEmpty();
 
             alice.close();
             bob.close();
         } finally {
-            executor.shutdownNow();
             group.shutdownGracefully().syncUninterruptibly();
         }
     }
 
     @Test
-    void offlineReceiverShouldStillPersistMessagesWithIncreasingSequence() throws Exception {
-        EventLoopGroup group = new NioEventLoopGroup(1);
-        try {
-            ConnectedClient alice = connect(group, "alice", "alice-web");
-
-            SendResult first = alice.sendMessage("cm-offline-1", 1002L, "offline 1");
-            SendResult second = alice.sendMessage("cm-offline-2", 1002L, "offline 2");
-            SendResult third = alice.sendMessage("cm-offline-3", 1002L, "offline 3");
-
-            Integer count = jdbcTemplate.queryForObject("select count(*) from message", Integer.class);
-            assertThat(count).isEqualTo(3);
-            assertThat(List.of(first.getSequence(), second.getSequence(), third.getSequence()))
-                    .containsExactly(1L, 2L, 3L);
-
-            alice.close();
-        } finally {
-            group.shutdownGracefully().syncUninterruptibly();
-        }
-    }
-
-    @Test
-    void receiverMultipleDevicesShouldAllReceivePush() throws Exception {
+    void sameUserDevicesShouldAckIndependently() throws Exception {
         EventLoopGroup group = new NioEventLoopGroup(3);
         try {
             ConnectedClient alice = connect(group, "alice", "alice-web");
             ConnectedClient bobWeb = connect(group, "bob", "bob-web");
-            ConnectedClient bobMobile = connect(group, "bob", "bob-mobile");
+            ConnectedClient bobPc = connect(group, "bob", "bob-pc");
 
-            SendResult result = alice.sendMessage("cm-multi-device", 1002L, "to all bob devices");
+            alice.sendMessage("ack-multi-device", 1002L, "both devices");
             PushMessage webPush = PushMessage.parseFrom(
                     bobWeb.nextOfType(MessageEnvelope.MessageType.PUSH_MESSAGE).getPayload());
-            PushMessage mobilePush = PushMessage.parseFrom(
-                    bobMobile.nextOfType(MessageEnvelope.MessageType.PUSH_MESSAGE).getPayload());
+            PushMessage pcPush = PushMessage.parseFrom(
+                    bobPc.nextOfType(MessageEnvelope.MessageType.PUSH_MESSAGE).getPayload());
 
-            assertThat(webPush.getMessageId()).isEqualTo(result.getMessageId());
-            assertThat(mobilePush.getMessageId()).isEqualTo(result.getMessageId());
+            assertThat(webPush.getMessageId()).isEqualTo(pcPush.getMessageId());
+            bobWeb.ack(webPush);
 
+            await().atMost(Duration.ofSeconds(1)).untilAsserted(() -> {
+                assertThat(pendingAckRepository.exists(1002L, "bob-web", webPush.getMessageId())).isFalse();
+                assertThat(pendingAckRepository.exists(1002L, "bob-pc", pcPush.getMessageId())).isTrue();
+            });
+
+            bobPc.ack(pcPush);
             alice.close();
             bobWeb.close();
-            bobMobile.close();
+            bobPc.close();
         } finally {
             group.shutdownGracefully().syncUninterruptibly();
         }
     }
 
     @Test
-    void webSocketClientsShouldReuseMessageServiceForSingleChat() throws Exception {
+    void offlineDeviceShouldStopOnlineRetry() throws Exception {
+        EventLoopGroup group = new NioEventLoopGroup(2);
+        try {
+            ConnectedClient alice = connect(group, "alice", "alice-web");
+            ConnectedClient bob = connect(group, "bob", "bob-web");
+
+            alice.sendMessage("ack-offline", 1002L, "disconnect");
+            PushMessage push = PushMessage.parseFrom(
+                    bob.nextOfType(MessageEnvelope.MessageType.PUSH_MESSAGE).getPayload());
+            bob.close();
+
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                    assertThat(pendingAckRepository.exists(1002L, "bob-web", push.getMessageId())).isFalse());
+
+            alice.close();
+        } finally {
+            group.shutdownGracefully().syncUninterruptibly();
+        }
+    }
+
+    @Test
+    void sendResultShouldNotMeanReceiverAck() throws Exception {
+        EventLoopGroup group = new NioEventLoopGroup(2);
+        try {
+            ConnectedClient alice = connect(group, "alice", "alice-web");
+            ConnectedClient bob = connect(group, "bob", "bob-web");
+
+            SendResult sendResult = alice.sendMessage("ack-independent", 1002L, "independent");
+            PushMessage push = PushMessage.parseFrom(
+                    bob.nextOfType(MessageEnvelope.MessageType.PUSH_MESSAGE).getPayload());
+
+            assertThat(sendResult.getMessageId()).isEqualTo(push.getMessageId());
+            assertThat(pendingAckRepository.exists(1002L, "bob-web", push.getMessageId())).isTrue();
+
+            bob.ack(push);
+            alice.close();
+            bob.close();
+        } finally {
+            group.shutdownGracefully().syncUninterruptibly();
+        }
+    }
+
+    @Test
+    void websocketAckShouldRemovePendingAck() throws Exception {
         LoginResult aliceLogin = login("alice");
         LoginResult bobLogin = login("bob");
 
@@ -266,66 +258,52 @@ class Phase3SingleChatIntegrationTest {
         try {
             alice.send(Map.of(
                     "type", "CONNECT",
-                    "requestId", "ws-connect-alice",
+                    "requestId", "ws-alice",
                     "token", aliceLogin.token(),
                     "deviceId", "alice-browser"));
             bob.send(Map.of(
                     "type", "CONNECT",
-                    "requestId", "ws-connect-bob",
+                    "requestId", "ws-bob",
                     "token", bobLogin.token(),
                     "deviceId", "bob-browser"));
 
-            assertThat(alice.nextType("CONNECT_ACK").path("payload").path("userId").asLong()).isEqualTo(1001L);
-            assertThat(bob.nextType("CONNECT_ACK").path("payload").path("userId").asLong()).isEqualTo(1002L);
+            alice.nextType("CONNECT_ACK");
+            bob.nextType("CONNECT_ACK");
 
-            String clientMessageId = "ws-cm-1";
             alice.send(Map.of(
                     "type", "SEND_MESSAGE",
-                    "requestId", clientMessageId,
+                    "requestId", "ws-ack-1",
                     "payload", Map.of(
-                            "clientMessageId", clientMessageId,
+                            "clientMessageId", "ws-ack-1",
                             "receiverId", 1002L,
-                            "content", "hello from websocket",
+                            "content", "websocket ack",
                             "messageType", "TEXT")));
 
             JsonNode sendResult = alice.nextType("SEND_RESULT");
             JsonNode push = bob.nextType("PUSH_MESSAGE");
+            String messageId = push.path("payload").path("messageId").asText();
 
-            assertThat(push.path("payload").path("messageId").asText())
-                    .isEqualTo(sendResult.path("payload").path("messageId").asText());
-            assertThat(push.path("payload").path("senderId").asLong()).isEqualTo(1001L);
-            assertThat(push.path("payload").path("content").asText()).isEqualTo("hello from websocket");
-            assertThat(jdbcTemplate.queryForObject("select count(*) from message", Integer.class)).isEqualTo(1);
+            assertThat(messageId).isEqualTo(sendResult.path("payload").path("messageId").asText());
+            assertThat(pendingAckRepository.exists(1002L, "bob-browser", messageId)).isTrue();
+
+            bob.send(Map.of(
+                    "type", "MESSAGE_ACK",
+                    "requestId", "ws-message-ack",
+                    "payload", Map.of(
+                            "messageId", messageId,
+                            "conversationId", push.path("payload").path("conversationId").asLong(),
+                            "sequence", push.path("payload").path("sequence").asLong())));
+
+            await().atMost(Duration.ofSeconds(1)).untilAsserted(() ->
+                    assertThat(pendingAckRepository.exists(1002L, "bob-browser", messageId)).isFalse());
         } finally {
             alice.close();
             bob.close();
         }
     }
 
-    @Test
-    void unauthenticatedChannelCannotSendMessage() throws Exception {
-        EventLoopGroup group = new NioEventLoopGroup(1);
-        try {
-            ConnectedClient raw = openRawClient(group);
-            raw.channel.writeAndFlush(sendEnvelope("send-without-connect", "cm-no-connect", 1002L, "nope"))
-                    .syncUninterruptibly();
-
-            MessageEnvelope error = raw.nextOfType(MessageEnvelope.MessageType.ERROR);
-            ErrorPayload payload = ErrorPayload.parseFrom(error.getPayload());
-            assertThat(payload.getCode()).isEqualTo("UNAUTHENTICATED");
-
-            Integer count = jdbcTemplate.queryForObject("select count(*) from message", Integer.class);
-            assertThat(count).isZero();
-            raw.close();
-        } finally {
-            group.shutdownGracefully().syncUninterruptibly();
-        }
-    }
-
     private ConnectedClient connect(EventLoopGroup group, String username, String deviceId) throws Exception {
         LoginResult login = login(username);
-        assertThat(login).isNotNull();
-
         ConnectedClient client = openRawClient(group);
         ConnectRequest request = ConnectRequest.newBuilder()
                 .setToken(login.token())
@@ -390,6 +368,20 @@ class Phase3SingleChatIntegrationTest {
                 .build();
     }
 
+    private MessageEnvelope ackEnvelope(PushMessage push) {
+        MessageAck ack = MessageAck.newBuilder()
+                .setMessageId(push.getMessageId())
+                .setConversationId(push.getConversationId())
+                .setSequence(push.getSequence())
+                .build();
+        return MessageEnvelope.newBuilder()
+                .setMessageType(MessageEnvelope.MessageType.MESSAGE_ACK)
+                .setRequestId("ack-" + push.getMessageId())
+                .setTimestamp(System.currentTimeMillis())
+                .setPayload(ack.toByteString())
+                .build();
+    }
+
     private final class ConnectedClient {
 
         private final Channel channel;
@@ -407,19 +399,32 @@ class Phase3SingleChatIntegrationTest {
             return SendResult.parseFrom(envelope.getPayload());
         }
 
+        private void ack(PushMessage push) {
+            channel.writeAndFlush(ackEnvelope(push)).syncUninterruptibly();
+        }
+
         private MessageEnvelope nextOfType(MessageEnvelope.MessageType messageType) throws InterruptedException {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            return pollOfType(messageType, Duration.ofSeconds(5))
+                    .orElseThrow(() -> new AssertionError("Timed out waiting for " + messageType));
+        }
+
+        private Optional<MessageEnvelope> pollOfType(
+                MessageEnvelope.MessageType messageType,
+                Duration timeout) throws InterruptedException {
+            long deadline = System.nanoTime() + timeout.toNanos();
             while (System.nanoTime() < deadline) {
-                MessageEnvelope envelope = collector.messages.poll(200, TimeUnit.MILLISECONDS);
+                MessageEnvelope envelope = collector.messages.poll(50, TimeUnit.MILLISECONDS);
                 if (envelope != null && envelope.getMessageType() == messageType) {
-                    return envelope;
+                    return Optional.of(envelope);
                 }
             }
-            throw new AssertionError("Timed out waiting for " + messageType);
+            return Optional.empty();
         }
 
         private void close() {
-            channel.close().syncUninterruptibly();
+            if (channel.isOpen()) {
+                channel.close().syncUninterruptibly();
+            }
         }
     }
 
@@ -454,7 +459,7 @@ class Phase3SingleChatIntegrationTest {
         private JsonNode nextType(String type) throws InterruptedException {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (System.nanoTime() < deadline) {
-                JsonNode message = messages.poll(200, TimeUnit.MILLISECONDS);
+                JsonNode message = messages.poll(50, TimeUnit.MILLISECONDS);
                 if (message != null && type.equals(message.path("type").asText())) {
                     return message;
                 }

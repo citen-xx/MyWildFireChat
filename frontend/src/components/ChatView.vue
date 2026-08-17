@@ -145,6 +145,9 @@ function send() {
 }
 
 function receivePush(payload: PushMessagePayload) {
+  if (messages.value.some((message) => message.messageId === payload.messageId)) {
+    return;
+  }
   messages.value.push({
     localId: payload.messageId,
     clientMessageId: payload.clientMessageId,

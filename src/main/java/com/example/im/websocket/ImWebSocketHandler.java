@@ -3,6 +3,7 @@ package com.example.im.websocket;
 import com.example.im.auth.security.JwtClaims;
 import com.example.im.auth.security.JwtService;
 import com.example.im.common.exception.AuthException;
+import com.example.im.message.ack.AckService;
 import com.example.im.message.service.MessageDeliveryService;
 import com.example.im.message.service.MessageService;
 import com.example.im.message.service.SendMessageCommand;
@@ -32,18 +33,21 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
     private final SessionManager sessionManager;
     private final MessageService messageService;
     private final MessageDeliveryService deliveryService;
+    private final AckService ackService;
 
     public ImWebSocketHandler(
             ObjectMapper objectMapper,
             JwtService jwtService,
             SessionManager sessionManager,
             MessageService messageService,
-            MessageDeliveryService deliveryService) {
+            MessageDeliveryService deliveryService,
+            AckService ackService) {
         this.objectMapper = objectMapper;
         this.jwtService = jwtService;
         this.sessionManager = sessionManager;
         this.messageService = messageService;
         this.deliveryService = deliveryService;
+        this.ackService = ackService;
     }
 
     @Override
@@ -72,6 +76,11 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
 
         if ("SEND_MESSAGE".equals(type)) {
             handleSendMessage(connection, imSession, root.path("payload"), requestId);
+            return;
+        }
+
+        if ("MESSAGE_ACK".equals(type)) {
+            handleMessageAck(connection, imSession, root.path("payload"), requestId);
             return;
         }
 
@@ -137,6 +146,24 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
             connection.sendJson("ERROR", requestId, Map.of(
                     "code", "SEND_MESSAGE_FAILED",
                     "message", "failed to persist message"));
+        }
+    }
+
+    private void handleMessageAck(
+            WebSocketClientConnection connection,
+            ImSession imSession,
+            JsonNode payload,
+            String requestId) {
+        try {
+            ackService.acknowledge(imSession.userId(), imSession.deviceId(), text(payload, "messageId"));
+        } catch (IllegalArgumentException exception) {
+            connection.sendJson("ERROR", requestId, Map.of(
+                    "code", "INVALID_MESSAGE_ACK",
+                    "message", exception.getMessage()));
+        } catch (Exception exception) {
+            connection.sendJson("ERROR", requestId, Map.of(
+                    "code", "MESSAGE_ACK_FAILED",
+                    "message", "failed to process acknowledgement"));
         }
     }
 

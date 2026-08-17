@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -75,6 +76,16 @@ public class MessageService {
                 .eq(ChatMessage::getSenderId, senderId)
                 .eq(ChatMessage::getClientMessageId, clientMessageId)
                 .last("limit 1"));
+    }
+
+    public Optional<SendMessageResult> findResultByMessageId(String messageId) {
+        if (messageId == null || messageId.isBlank()) {
+            return Optional.empty();
+        }
+        ChatMessage message = messageMapper.selectOne(new LambdaQueryWrapper<ChatMessage>()
+                .eq(ChatMessage::getMessageId, messageId)
+                .last("limit 1"));
+        return Optional.ofNullable(message).map(item -> toResult(item, true));
     }
 
     private void validate(Long senderId, SendMessageCommand command) {

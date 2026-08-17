@@ -93,6 +93,19 @@ public class SessionManager {
                 .toList();
     }
 
+    public List<ActiveClientSession> findUserSessionConnections(Long userId) {
+        return connectionsBySession.entrySet().stream()
+                .filter(entry -> entry.getKey().userId().equals(userId))
+                .filter(entry -> entry.getValue().isActive())
+                .map(entry -> new ActiveClientSession(entry.getKey(), entry.getValue()))
+                .toList();
+    }
+
+    public Optional<ClientConnection> findConnection(Long userId, String deviceId) {
+        return Optional.ofNullable(connectionsBySession.get(new SessionKey(userId, deviceId)))
+                .filter(ClientConnection::isActive);
+    }
+
     public Optional<ImSession> getSession(Channel channel) {
         return Optional.ofNullable(channel.attr(SESSION_ATTRIBUTE).get());
     }

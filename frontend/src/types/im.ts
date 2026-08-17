@@ -49,6 +49,12 @@ export interface PushMessagePayload extends SendResultPayload {
   messageType: 'TEXT';
 }
 
+export interface MessageAckPayload {
+  messageId: string;
+  conversationId: number;
+  sequence: number;
+}
+
 export interface ErrorPayload {
   code: string;
   message: string;

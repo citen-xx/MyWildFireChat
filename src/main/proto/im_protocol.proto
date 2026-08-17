@@ -70,3 +70,9 @@ message PushMessage {
   string message_type = 8;
   int64 created_at = 9;
 }
+
+message MessageAck {
+  string message_id = 1;
+  int64 conversation_id = 2;
+  int64 sequence = 3;
+}

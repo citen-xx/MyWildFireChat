@@ -2,6 +2,7 @@ import type {
   ChatMessage,
   ConnectionStatus,
   ErrorPayload,
+  MessageAckPayload,
   PushMessagePayload,
   SendResultPayload,
   WsEnvelope,
@@ -85,12 +86,29 @@ export class ImSocket {
       return;
     }
     if (envelope.type === 'PUSH_MESSAGE') {
-      this.options.onPushMessage(envelope.payload as PushMessagePayload);
+      this.handlePushMessage(envelope.payload as PushMessagePayload);
       return;
     }
     if (envelope.type === 'ERROR') {
       this.options.onError(envelope.payload as ErrorPayload);
     }
+  }
+
+  private handlePushMessage(payload: PushMessagePayload) {
+    this.options.onPushMessage(payload);
+    this.sendMessageAck({
+      messageId: payload.messageId,
+      conversationId: payload.conversationId,
+      sequence: payload.sequence,
+    });
+  }
+
+  private sendMessageAck(payload: MessageAckPayload) {
+    this.send({
+      type: 'MESSAGE_ACK',
+      requestId: crypto.randomUUID(),
+      payload,
+    });
   }
 
   private handleClose() {

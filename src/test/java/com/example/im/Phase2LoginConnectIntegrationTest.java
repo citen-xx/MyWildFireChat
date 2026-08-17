@@ -45,6 +45,8 @@ import static org.awaitility.Awaitility.await;
                 "im.chat.enabled=false",
                 "im.mybatis.enabled=false",
                 "im.sequence.redis-enabled=false",
+                "im.ack.redis-enabled=false",
+                "im.ack.retry-enabled=false",
                 "im.websocket.enabled=false",
                 "spring.autoconfigure.exclude="
                         + "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration,"
