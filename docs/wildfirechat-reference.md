@@ -46,3 +46,20 @@ Only general architecture observations are documented above.
 - WildfireChat closes idle channels through a Netty idle timeout handler. This
   project uses Netty `IdleStateHandler` plus a small `HeartbeatHandler` that
   responds to `PING` with `PONG` and closes reader-idle channels.
+
+## Phase 3 applied notes
+
+- WildfireChat's `SendMessageHandler` demonstrates the idea that inbound send
+  requests should be validated, persisted, and then dispatched to recipients.
+  This project keeps that flow but implements a new `SendMessageRequest`,
+  `MessageService`, schema, and persistence model without copying its handler
+  code or MQTT packet types.
+- WildfireChat's schema shows durable message storage and uniqueness/indexing
+  concerns. This project defines its own `conversation`, `conversation_member`,
+  and `message` tables with `UNIQUE(biz_key)`,
+  `UNIQUE(sender_id, client_message_id)`, and
+  `UNIQUE(conversation_id, sequence)`.
+- WildfireChat separates connection/session lookup from message processing.
+  This project keeps the same responsibility split: `MessageHandler` parses the
+  protocol, `MessageService` owns persistence and idempotency, and
+  `MessageDeliveryService` pushes to local online device channels.

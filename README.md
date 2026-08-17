@@ -6,8 +6,8 @@
 WildfireChat 的长连接、会话、投递和同步设计思想，但不复制其源码、
 包名、MQTT 协议或工程结构。
 
-当前已完成 Phase 2：Spring Boot 登录接口、JWT 生成与校验、Netty
-`CONNECT` 鉴权、设备级 Session 管理、`PING/PONG` 心跳和空闲连接清理。
+当前已完成 Phase 3：在 Phase 2 基础上实现单聊、Conversation、MySQL
+消息持久化、`clientMessageId` 幂等、Conversation sequence 和在线设备推送。
 
 ## Architecture
 
@@ -28,8 +28,8 @@ REST Client
   -> Application Service
 ```
 
-Phase 2 完成连接层闭环。消息持久化、ACK、离线同步、Redis route、
-RabbitMQ 跨节点转发会在后续阶段逐步完成。
+Phase 3 完成单节点单聊核心链路。接收方 ACK、消息重投、离线同步、Redis
+route、RabbitMQ 跨节点转发会在后续阶段逐步完成。
 
 ## 模块说明
 
@@ -53,27 +53,32 @@ com.example.im
 
 当前 schema 文件：`src/main/resources/db/schema.sql`
 
-Phase 2 已创建：
+已创建：
 
 - `user_account`: 登录用户表，包含 `id`, `username`, `password_hash`, `status`
 - `uk_user_account_username`: 保证用户名唯一
+- `conversation`: 会话表，`biz_key` 唯一
+- `conversation_member`: 会话成员表，`(conversation_id, user_id)` 联合主键
+- `message`: 消息表
 
 当前种子数据文件：`src/main/resources/db/data.sql`
 
 - `alice / password123`, userId: `1001`
 - `bob / password123`, userId: `1002`
 
-后续 Phase 3-6 会继续加入 `conversation`, `conversation_member`, `message`,
-`chat_group`, `group_member`。
+后续 Phase 6 会加入 `chat_group`, `group_member`。
 
-`message.message_id` 会建立唯一索引，`conversation_id + sequence` 会建立
-唯一索引或强约束索引，用于顺序读取和增量同步。
+`message` 关键约束：
+
+- `UNIQUE(message_id)`: 服务端业务消息 ID 全局唯一
+- `UNIQUE(sender_id, client_message_id)`: 客户端重试幂等
+- `UNIQUE(conversation_id, sequence)`: 会话内 sequence 不重复
 
 ## Redis Key
 
-Phase 1 只接入 Redis 配置。计划 key：
+当前和后续计划使用：
 
-- `im:seq:{conversationId}`: conversation sequence counter
+- `im:seq:{conversationId}`: Conversation sequence counter，Phase 3 使用 Redis `INCR`
 - `im:route:{userId}:{deviceId}`: online route with TTL
 - `im:pending_ack:{userId}:{deviceId}`: pending ACK messages
 
@@ -97,7 +102,8 @@ Phase 1 只提供 Docker Compose RabbitMQ。Phase 8 中 RabbitMQ 只用于跨 IM
 
 - `CONNECT`, `CONNECT_ACK`
 - `PING`, `PONG`
-- `SEND_MESSAGE`, `MESSAGE_ACK`
+- `SEND_MESSAGE`, `SEND_RESULT`, `PUSH_MESSAGE`
+- `MESSAGE_ACK`
 - `SYNC_REQUEST`, `SYNC_RESPONSE`
 - `ERROR`
 
@@ -107,7 +113,63 @@ Phase 2 已实现 payload：
 - `ConnectAck(userId, deviceId, serverTime)`
 - `ErrorPayload(code, message)`
 
+Phase 3 已实现 payload：
+
+- `SendMessageRequest(clientMessageId, receiverId, content, messageType)`
+- `SendResult(clientMessageId, messageId, conversationId, sequence, createdAt)`
+- `PushMessage(messageId, clientMessageId, conversationId, sequence, senderId, receiverId, content, messageType, createdAt)`
+
+`SendResult` 只表示服务端已经成功接收并持久化，不表示接收方已经收到。
+真正的消息投递 ACK 放到 Phase 4。
+
 TCP framing 使用 4 字节 length field，避免 TCP 粘包拆包问题。
+
+## 单聊发送链路
+
+```text
+Client A
+  -> SEND_MESSAGE(clientMessageId, receiverId, content, messageType)
+  -> AuthHandler confirms CONNECT
+  -> MessageHandler reads senderId from Session
+  -> MessageService
+  -> ConversationService get-or-create single conversation
+  -> Redis INCR im:seq:{conversationId}
+  -> MySQL insert message
+  -> SEND_RESULT to Client A
+  -> SessionManager finds all receiver devices
+  -> PUSH_MESSAGE to each local Channel
+```
+
+客户端不能在 `SendMessageRequest` 中提供 `senderId`。服务端只使用
+`SessionManager` 中 CONNECT 时绑定的 userId。
+
+如果接收方离线，本阶段只完成 MySQL 落库，不主动补偿；离线同步放到 Phase 5。
+
+## Conversation 唯一性
+
+单聊使用规范化 key：
+
+```text
+single:min(userIdA, userIdB):max(userIdA, userIdB)
+```
+
+因此 `1001 -> 1002` 和 `1002 -> 1001` 都得到：
+
+```text
+single:1001:1002
+```
+
+Java 层先查询只是优化；最终依靠 `UNIQUE(biz_key)` 处理两个线程首次并发
+创建的情况。插入冲突后重新查询已有 Conversation，不使用 JVM 锁替代数据库约束。
+
+## clientMessageId 幂等
+
+`clientMessageId` 是客户端发送前生成的请求 ID；`messageId` 是服务端成功落库
+后生成的全局业务消息 ID。
+
+服务端先查询 `(sender_id, client_message_id)`。并发重复请求即使同时通过了
+第一次查询，也会被数据库唯一约束拦住；服务端随后查询并返回第一次落库的
+`messageId` 和 `sequence`，不会重复插入消息。
 
 ## 登录与 CONNECT 鉴权
 
@@ -195,11 +257,17 @@ TODO: Phase 4 实现。
 
 ## Sequence 机制
 
-TODO: Phase 3 实现。
+Phase 3 使用 Redis `INCR im:seq:{conversationId}` 分配 sequence。
 
-计划使用 Redis `INCR im:seq:{conversationId}` 分配单调递增 sequence。允许
-sequence 空洞，因为 Redis 分配成功后 MySQL 持久化可能失败；空洞不影响
-严格单调、排序和 `sequence > lastSequence` 增量同步。
+sequence 只要求同一 Conversation 内严格递增和唯一，不要求严格连续。
+例如 Redis 分配了 `3`，但随后 MySQL 插入失败，下一条消息可能使用 `4`，
+因此出现 `1, 2, 4` 的空洞。
+
+空洞是可接受的，因为 sequence 的用途是排序和增量游标，不是数据库行号。
+MySQL 通过 `UNIQUE(conversation_id, sequence)` 作为最终约束。
+
+Redis 和 MySQL 之间不是强一致事务：Redis INCR 成功后，MySQL 可能失败。
+本阶段不回收 sequence，也不宣称 Redis/MySQL 分布式事务。
 
 ## 离线同步机制
 
@@ -216,6 +284,87 @@ TODO: Phase 7-8 实现。
 `userId + deviceId -> serverId` 并设置 TTL。跨节点消息通过 RabbitMQ 转发到
 目标 `serverId` 所在实例。
 
+## Web Client
+
+Phase 3 之后新增一个最小可用 Web 前端，用于浏览器演示 Alice/Bob 单聊。
+
+前端技术栈：
+
+- Vue 3
+- Vite
+- TypeScript
+- Axios
+- 原生 CSS
+
+前端目录：`frontend/`
+
+WebSocket 地址：
+
+```text
+ws://localhost:8080/ws/im
+```
+
+选择 Spring WebSocket 挂在 8080，是因为当前项目已经有 Spring Boot Web。
+这样浏览器 WebSocket 可以直接注入并复用 `JwtService`、`SessionManager`、
+`MessageService`、`ConversationService`，不需要再启动一个独立的 Netty
+WebSocket Server，也不会复制一套聊天业务。
+
+WebSocket JSON 协议：
+
+```json
+{
+  "type": "CONNECT",
+  "requestId": "uuid",
+  "token": "jwt-token",
+  "deviceId": "web-device-id"
+}
+```
+
+```json
+{
+  "type": "SEND_MESSAGE",
+  "requestId": "client-message-id",
+  "payload": {
+    "clientMessageId": "uuid",
+    "receiverId": 1002,
+    "content": "hello bob",
+    "messageType": "TEXT"
+  }
+}
+```
+
+服务端返回：
+
+- `CONNECT_ACK`: WebSocket 鉴权成功
+- `SEND_RESULT`: 服务端已接收并持久化
+- `PUSH_MESSAGE`: 在线接收方收到推送
+- `ERROR`: 协议或鉴权错误
+- `PONG`: 心跳响应
+
+WebSocket 只是协议适配层：
+
+```text
+Browser JSON
+  -> ImWebSocketHandler
+  -> SendMessageCommand
+  -> MessageService
+  -> ConversationService / MySQL / Redis sequence
+  -> MessageDeliveryService
+  -> SessionManager
+  -> WebSocketClientConnection or NettyClientConnection
+```
+
+TCP 仍走：
+
+```text
+Protobuf
+  -> MessageHandler
+  -> SendMessageCommand
+  -> MessageService
+```
+
+也就是说，TCP 和 WebSocket 最终复用同一套业务服务。
+
 ## 如何运行
 
 启动依赖：
@@ -228,6 +377,20 @@ docker compose up -d mysql redis rabbitmq
 
 ```text
 mvn spring-boot:run
+```
+
+启动前端：
+
+```text
+cd frontend
+npm install
+npm run dev
+```
+
+浏览器打开：
+
+```text
+http://localhost:5173
 ```
 
 默认端口：
@@ -248,9 +411,19 @@ Invoke-RestMethod -Method Post `
   -Body '{"username":"alice","password":"password123"}'
 ```
 
-当前 Phase 2 的 Netty 手动验证主要通过集成测试完成：测试里会启动两个真实
-Netty 客户端，分别以 `alice-web` 和 `bob-web` 连接，完成 `CONNECT_ACK` 和
-`PING/PONG` 验证。正式 CLI 客户端会在消息发送链路进入 Phase 3 后补齐。
+Web 聊天测试：
+
+1. 浏览器窗口 A 登录 `alice / password123`
+2. 浏览器窗口 B 或无痕窗口登录 `bob / password123`
+3. Alice 选择 Bob，发送 `hello bob`
+4. Bob 页面实时出现 Alice 的消息
+5. Bob 回复 `hello alice`
+6. Alice 页面实时收到 Bob 的消息
+7. 关闭 Bob 页面后，Alice 继续发送消息；当前 Phase 3 只保证消息落库，不做离线补偿
+
+当前 Phase 2/3 的 Netty 验证主要通过集成测试完成：测试会启动真实 Netty
+客户端，完成登录、CONNECT、SEND_MESSAGE、SEND_RESULT、PUSH_MESSAGE 和
+数据库断言。正式 CLI 客户端仍未提供。
 
 ## 如何测试
 
@@ -258,7 +431,7 @@ Netty 客户端，分别以 `alice-web` 和 `bob-web` 连接，完成 `CONNECT_A
 mvn test
 ```
 
-Phase 2 测试覆盖：
+Phase 3 测试覆盖：
 
 - Protobuf `MessageEnvelope` 序列化/反序列化
 - `PING` 产生 `PONG`
@@ -270,18 +443,27 @@ Phase 2 测试覆盖：
 - 相同设备重复登录会替换旧 Channel
 - 两个用户通过真实 HTTP 登录，再通过真实 Netty 客户端 CONNECT 和心跳
 - Channel 关闭后 Session 会被清理
+- Alice 给 Bob 发送单聊，Bob 收到 `PUSH_MESSAGE`
+- 消息写入数据库，senderId 从 Session 获取
+- 重复 `clientMessageId` 只产生一条消息并返回原结果
+- 两个方向并发首次发消息只创建一个 Conversation
+- Conversation sequence 递增
+- Bob 离线时消息仍然落库
+- Bob 多设备同时在线时每个设备都收到 Push
+- 未 CONNECT 的客户端无法发送消息
 
 ## 当前限制
 
 - 登录密码当前使用 `{noop}` 种子数据，`{pbkdf2}` 校验能力已预留，后续需要提供注册或管理脚本生成安全密码
 - 当前只实现单进程内存 Session，Redis route 还未实现
-- 未实现消息持久化、ACK、重投、离线同步
+- Phase 3 集成测试使用 H2 MySQL mode；生产运行配置仍使用 MySQL
+- Web 前端使用固定 Demo User List: Alice/Bob，不是好友系统
+- 未实现接收方 ACK、消息重投、离线同步
 - 未实现群聊、多端同步、Redis route、RabbitMQ 跨节点转发
 - 当前 CLI 客户端尚未提供
 
 ## TODO
 
-- Phase 3: 单聊、messageId 幂等、conversation sequence、MySQL 持久化
 - Phase 4: ACK、重复发送幂等、消息重投
 - Phase 5: 离线消息和 `SYNC_REQUEST`
 - Phase 6: 群聊

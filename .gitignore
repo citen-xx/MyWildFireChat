@@ -3,3 +3,6 @@ target/
 .idea/
 *.iml
 .codex-maven-settings.xml
+frontend/node_modules/
+frontend/dist/
+frontend/.npm-cache/

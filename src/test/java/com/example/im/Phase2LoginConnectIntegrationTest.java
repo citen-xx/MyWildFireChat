@@ -42,6 +42,10 @@ import static org.awaitility.Awaitility.await;
         properties = {
                 "im.netty.port=0",
                 "im.auth.database-enabled=false",
+                "im.chat.enabled=false",
+                "im.mybatis.enabled=false",
+                "im.sequence.redis-enabled=false",
+                "im.websocket.enabled=false",
                 "spring.autoconfigure.exclude="
                         + "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration,"
                         + "org.springframework.boot.autoconfigure.sql.init.SqlInitializationAutoConfiguration,"

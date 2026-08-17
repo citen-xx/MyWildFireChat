@@ -18,6 +18,8 @@ message MessageEnvelope {
     SYNC_REQUEST = 7;
     SYNC_RESPONSE = 8;
     ERROR = 9;
+    PUSH_MESSAGE = 10;
+    SEND_RESULT = 11;
   }
 
   MessageType message_type = 1;
@@ -40,4 +42,31 @@ message ConnectAck {
 message ErrorPayload {
   string code = 1;
   string message = 2;
+}
+
+message SendMessageRequest {
+  string client_message_id = 1;
+  int64 receiver_id = 2;
+  string content = 3;
+  string message_type = 4;
+}
+
+message SendResult {
+  string client_message_id = 1;
+  string message_id = 2;
+  int64 conversation_id = 3;
+  int64 sequence = 4;
+  int64 created_at = 5;
+}
+
+message PushMessage {
+  string message_id = 1;
+  string client_message_id = 2;
+  int64 conversation_id = 3;
+  int64 sequence = 4;
+  int64 sender_id = 5;
+  int64 receiver_id = 6;
+  string content = 7;
+  string message_type = 8;
+  int64 created_at = 9;
 }
