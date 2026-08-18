@@ -1,5 +1,6 @@
 package com.example.im.message.ack;
 
+import com.example.im.conversation.service.ConversationService;
 import com.example.im.message.service.MessageService;
 import com.example.im.message.service.SendMessageResult;
 import com.example.im.netty.session.ClientConnection;
@@ -29,17 +30,20 @@ public class AckRetryScheduler {
     private final MessageService messageService;
     private final SessionManager sessionManager;
     private final AckProperties properties;
+    private final ConversationService conversationService;
     private ScheduledExecutorService executor;
 
     public AckRetryScheduler(
             PendingAckRepository pendingAckRepository,
             MessageService messageService,
             SessionManager sessionManager,
-            AckProperties properties) {
+            AckProperties properties,
+            ConversationService conversationService) {
         this.pendingAckRepository = pendingAckRepository;
         this.messageService = messageService;
         this.sessionManager = sessionManager;
         this.properties = properties;
+        this.conversationService = conversationService;
     }
 
     @PostConstruct
@@ -92,6 +96,13 @@ public class AckRetryScheduler {
         if (message.isEmpty()) {
             pendingAckRepository.remove(pendingAck.userId(), pendingAck.deviceId(), pendingAck.messageId());
             log.warn("message retry skipped because message is missing messageId={} userId={} deviceId={} attempt={}",
+                    pendingAck.messageId(), pendingAck.userId(), pendingAck.deviceId(), pendingAck.attempt());
+            return;
+        }
+
+        if (!conversationService.isMember(message.get().conversationId(), pendingAck.userId())) {
+            pendingAckRepository.remove(pendingAck.userId(), pendingAck.deviceId(), pendingAck.messageId());
+            log.info("message retry stopped because member is inactive messageId={} userId={} deviceId={} attempt={}",
                     pendingAck.messageId(), pendingAck.userId(), pendingAck.deviceId(), pendingAck.attempt());
             return;
         }

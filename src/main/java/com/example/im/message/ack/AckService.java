@@ -21,6 +21,10 @@ public class AckService {
     }
 
     public void recordPush(SendMessageResult message, String deviceId) {
+        recordPush(message, message.receiverId(), deviceId);
+    }
+
+    public void recordPush(SendMessageResult message, Long userId, String deviceId) {
         if (!properties.isRetryEnabled()) {
             return;
         }
@@ -29,13 +33,13 @@ public class AckService {
         }
         long nextRetryAt = System.currentTimeMillis() + properties.delayForAttempt(0);
         pendingAckRepository.save(new PendingAck(
-                message.receiverId(),
+                userId,
                 deviceId,
                 message.messageId(),
                 nextRetryAt,
                 0));
         log.info("message push messageId={} userId={} deviceId={} attempt={}",
-                message.messageId(), message.receiverId(), deviceId, 0);
+                message.messageId(), userId, deviceId, 0);
     }
 
     public void acknowledge(Long userId, String deviceId, String messageId) {

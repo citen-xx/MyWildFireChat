@@ -9,7 +9,8 @@ spring:
   sql:
     init:
       mode: always
-      schema-locations: classpath:db/schema.sql
+      continue-on-error: true
+      schema-locations: classpath:db/schema.sql,classpath:db/schema-mysql-migrate.sql
       data-locations: classpath:db/data.sql
   data:
     redis:

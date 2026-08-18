@@ -13,27 +13,74 @@
 
     <section class="chat-layout">
       <aside class="sidebar">
-        <p class="section-title">Demo Users</p>
-        <button
-          v-for="user in recipients"
-          :key="user.userId"
-          type="button"
-          class="user-button"
-          :class="{ active: user.userId === selectedUser.userId }"
-          @click="selectedUser = user"
-        >
-          {{ user.label }}
-        </button>
+        <div class="pane-tabs">
+          <button type="button" class="tab-button" :class="{ active: activePane === 'DIRECT' }" @click="activePane = 'DIRECT'">
+            Direct
+          </button>
+          <button type="button" class="tab-button" :class="{ active: activePane === 'GROUP' }" @click="activePane = 'GROUP'">
+            Groups
+          </button>
+        </div>
+
+        <template v-if="activePane === 'DIRECT'">
+          <p class="section-title">Demo Users</p>
+          <button
+            v-for="user in directRecipients"
+            :key="user.userId"
+            type="button"
+            class="user-button"
+            :class="{ active: selectedUser.userId === user.userId }"
+            @click="selectDirect(user)"
+          >
+            {{ user.label }}
+          </button>
+        </template>
+
+        <template v-else>
+          <p class="section-title">Create Group</p>
+          <input v-model="groupName" class="group-input" placeholder="Group name" />
+          <label v-for="user in groupCandidates" :key="user.userId" class="group-check">
+            <input v-model="groupMemberIds" type="checkbox" :value="user.userId" />
+            <span>{{ user.label }}</span>
+          </label>
+          <button type="button" class="group-action" :disabled="!canCreateGroup" @click="createGroup">
+            Create Group
+          </button>
+
+          <p class="section-title">My Groups</p>
+          <button
+            v-for="group in groups"
+            :key="group.groupId"
+            type="button"
+            class="user-button"
+            :class="{ active: selectedGroup?.groupId === group.groupId }"
+            @click="selectGroup(group)"
+          >
+            {{ group.groupName }} · {{ group.memberCount }}
+          </button>
+          <div v-if="selectedGroup" class="group-actions">
+            <button v-if="selectedGroup.role === 'OWNER'" type="button" @click="disbandSelectedGroup">Disband</button>
+            <button v-else type="button" @click="leaveSelectedGroup">Leave</button>
+          </div>
+        </template>
       </aside>
 
       <section class="conversation">
         <div class="conversation-header">
-          <span>Chat with {{ selectedUser.label }}</span>
-          <small>receiverId: {{ selectedUser.userId }}</small>
+          <span>{{ conversationTitle }}</span>
+          <small>{{ conversationSubTitle }}</small>
         </div>
 
         <div class="messages">
           <p v-if="status === 'Syncing'" class="syncing-text">正在同步历史消息...</p>
+          <p v-if="activePane === 'GROUP' && selectedGroup" class="group-meta">
+            Members: {{ selectedGroup.memberCount }} · {{ selectedGroup.role }}
+          </p>
+          <div v-if="activePane === 'GROUP' && groupMembers.length > 0" class="group-member-list">
+            <span v-for="member in groupMembers" :key="member.userId">
+              {{ member.username || `User ${member.userId}` }} · {{ member.role }}
+            </span>
+          </div>
           <div
             v-for="message in visibleMessages"
             :key="message.localId"
@@ -67,7 +114,10 @@ import { ImSocket } from '../services/imSocket';
 import type {
   ChatMessage,
   ConnectionStatus,
+  CreateGroupRequest,
   DemoUser,
+  GroupMemberView,
+  GroupSummary,
   LoginResult,
   PushMessagePayload,
   SendResultPayload,
@@ -85,12 +135,18 @@ const emit = defineEmits<{
 const demoUsers: DemoUser[] = [
   { userId: 1001, username: 'alice', label: 'Alice' },
   { userId: 1002, username: 'bob', label: 'Bob' },
+  { userId: 1003, username: 'charlie', label: 'Charlie' },
 ];
 
 const SYNC_PAGE_LIMIT = 100;
 
-const recipients = computed(() => demoUsers.filter((user) => user.userId !== props.currentUser.userId));
-const selectedUser = ref<DemoUser>(recipients.value[0] ?? demoUsers[0]);
+const activePane = ref<'DIRECT' | 'GROUP'>('DIRECT');
+const selectedUser = ref<DemoUser>(directRecipientsDefault());
+const selectedGroup = ref<GroupSummary | null>(null);
+const groups = ref<GroupSummary[]>([]);
+const groupMembers = ref<GroupMemberView[]>([]);
+const groupName = ref('');
+const groupMemberIds = ref<number[]>([]);
 const status = ref<ConnectionStatus>('Offline');
 const draft = ref('');
 const messages = ref<ChatMessage[]>([]);
@@ -103,14 +159,39 @@ const knownConversationIds = new Set<number>();
 let socket: ImSocket | undefined;
 let syncVersion = 0;
 
-const canSend = computed(() => status.value === 'Online' && draft.value.trim().length > 0);
-const visibleMessages = computed(() =>
-  messages.value.filter(
+const directRecipients = computed(() => demoUsers.filter((user) => user.userId !== props.currentUser.userId));
+const groupCandidates = computed(() => demoUsers.filter((user) => user.userId !== props.currentUser.userId));
+const canCreateGroup = computed(() => groupName.value.trim().length > 0 && groupMemberIds.value.length > 0);
+const hasConversationTarget = computed(() =>
+  activePane.value === 'DIRECT' ? Boolean(selectedUser.value) : Boolean(selectedGroup.value),
+);
+const canSend = computed(() => status.value === 'Online' && draft.value.trim().length > 0 && hasConversationTarget.value);
+const visibleMessages = computed(() => {
+  if (activePane.value === 'GROUP') {
+    const conversationId = selectedGroup.value?.conversationId;
+    if (!conversationId) {
+      return [];
+    }
+    return messages.value.filter((message) => message.conversationId === conversationId);
+  }
+  return messages.value.filter(
     (message) =>
       message.senderId === selectedUser.value.userId ||
       message.receiverId === selectedUser.value.userId,
-  ),
-);
+  );
+});
+const conversationTitle = computed(() => {
+  if (activePane.value === 'GROUP' && selectedGroup.value) {
+    return `Group: ${selectedGroup.value.groupName}`;
+  }
+  return `Chat with ${selectedUser.value.label}`;
+});
+const conversationSubTitle = computed(() => {
+  if (activePane.value === 'GROUP' && selectedGroup.value) {
+    return `groupId: ${selectedGroup.value.groupId} · conversationId: ${selectedGroup.value.conversationId}`;
+  }
+  return `receiverId: ${selectedUser.value.userId}`;
+});
 
 onMounted(() => {
   socket = new ImSocket({
@@ -128,7 +209,7 @@ onMounted(() => {
     onPushMessage: receivePush,
     onSendResult: applySendResult,
     onSyncComplete: () => {
-      // SYNC_COMPLETE is informational; cursor advances only from processed messages.
+      // informational only
     },
     onError: (nextError) => {
       error.value = `${nextError.code}: ${nextError.message}`;
@@ -136,6 +217,7 @@ onMounted(() => {
     },
   });
   socket.connect();
+  void loadGroups();
 });
 
 onUnmounted(() => {
@@ -143,25 +225,145 @@ onUnmounted(() => {
   socket?.close();
 });
 
+function selectDirect(user: DemoUser) {
+  activePane.value = 'DIRECT';
+  selectedUser.value = user;
+  groupMembers.value = [];
+}
+
+async function selectGroup(group: GroupSummary) {
+  activePane.value = 'GROUP';
+  selectedGroup.value = group;
+  await loadGroupMembers(group.groupId);
+}
+
+async function loadGroups() {
+  try {
+    const response = await fetch('/api/groups', { headers: authHeaders() });
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as GroupSummary[];
+    groups.value = payload;
+    for (const group of payload) {
+      rememberConversation(group.conversationId);
+    }
+    if (activePane.value === 'GROUP' && selectedGroup.value) {
+      const refreshed = payload.find((group) => group.groupId === selectedGroup.value?.groupId);
+      if (refreshed) {
+        selectedGroup.value = refreshed;
+      }
+    }
+  } catch (exception) {
+    console.warn('failed to load groups', exception);
+  }
+}
+
+async function loadGroupMembers(groupId: number) {
+  try {
+    const response = await fetch(`/api/groups/${groupId}/members`, { headers: authHeaders() });
+    if (!response.ok) {
+      groupMembers.value = [];
+      return;
+    }
+    groupMembers.value = (await response.json()) as GroupMemberView[];
+  } catch (exception) {
+    console.warn('failed to load group members', exception);
+    groupMembers.value = [];
+  }
+}
+
+async function createGroup() {
+  if (!canCreateGroup.value) {
+    return;
+  }
+  try {
+    const request: CreateGroupRequest = {
+      name: groupName.value.trim(),
+      memberIds: [...groupMemberIds.value],
+    };
+    const response = await fetch('/api/groups', {
+      method: 'POST',
+      headers: {
+        ...authHeaders(),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const created = (await response.json()) as GroupSummary;
+    groupName.value = '';
+    groupMemberIds.value = [];
+    await loadGroups();
+    selectedGroup.value = created;
+    activePane.value = 'GROUP';
+    await loadGroupMembers(created.groupId);
+    rememberConversation(created.conversationId);
+  } catch (exception) {
+    console.warn('failed to create group', exception);
+  }
+}
+
+async function leaveSelectedGroup() {
+  if (!selectedGroup.value) {
+    return;
+  }
+  try {
+    await fetch(`/api/groups/${selectedGroup.value.groupId}/leave`, {
+      method: 'POST',
+      headers: authHeaders(),
+    });
+    selectedGroup.value = null;
+    activePane.value = 'DIRECT';
+    await loadGroups();
+  } catch (exception) {
+    console.warn('failed to leave group', exception);
+  }
+}
+
+async function disbandSelectedGroup() {
+  if (!selectedGroup.value) {
+    return;
+  }
+  try {
+    await fetch(`/api/groups/${selectedGroup.value.groupId}`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    selectedGroup.value = null;
+    activePane.value = 'DIRECT';
+    await loadGroups();
+  } catch (exception) {
+    console.warn('failed to disband group', exception);
+  }
+}
+
 function send() {
   if (!canSend.value) {
     return;
   }
   const content = draft.value.trim();
   const clientMessageId = crypto.randomUUID();
-  const message: ChatMessage = {
+  const baseMessage: ChatMessage = {
     localId: clientMessageId,
     clientMessageId,
     senderId: props.currentUser.userId,
-    receiverId: selectedUser.value.userId,
+    receiverId: activePane.value === 'GROUP' ? 0 : selectedUser.value.userId,
+    conversationId: activePane.value === 'GROUP' ? selectedGroup.value?.conversationId : undefined,
     content,
     messageType: 'TEXT',
     createdAt: Date.now(),
     status: 'sending',
   };
-  messages.value = sortMessages([...messages.value, message]);
+  messages.value = sortMessages([...messages.value, baseMessage]);
   draft.value = '';
-  socket?.sendChatMessage(message);
+  if (activePane.value === 'GROUP' && selectedGroup.value) {
+    socket?.sendGroupMessage(baseMessage, selectedGroup.value.groupId);
+    return;
+  }
+  socket?.sendChatMessage(baseMessage);
 }
 
 function receivePush(payload: PushMessagePayload) {
@@ -380,6 +582,12 @@ function cursorKey(conversationId: number) {
   return `im:cursor:${props.currentUser.userId}:${deviceId}:${conversationId}`;
 }
 
+function authHeaders() {
+  return {
+    Authorization: `Bearer ${props.currentUser.token}`,
+  };
+}
+
 function logout() {
   syncVersion += 1;
   socket?.close();
@@ -394,9 +602,9 @@ function getDeviceId() {
   if (existing) {
     return existing;
   }
-  const deviceId = `web-${crypto.randomUUID()}`;
-  sessionStorage.setItem('im.webDeviceId', deviceId);
-  return deviceId;
+  const webDeviceId = `web-${crypto.randomUUID()}`;
+  sessionStorage.setItem('im.webDeviceId', webDeviceId);
+  return webDeviceId;
 }
 
 function senderName(userId: number) {
@@ -408,5 +616,9 @@ function senderName(userId: number) {
 
 function formatTime(timestamp: number) {
   return new Date(timestamp).toLocaleTimeString();
+}
+
+function directRecipientsDefault() {
+  return demoUsers.find((user) => user.userId !== props.currentUser.userId) ?? demoUsers[0];
 }
 </script>
