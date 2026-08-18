@@ -70,6 +70,21 @@ export class ImSocket {
       payload: {
         clientMessageId: message.clientMessageId,
         receiverId: message.receiverId,
+        conversationType: 'DIRECT',
+        content: message.content,
+        messageType: message.messageType,
+      },
+    });
+  }
+
+  sendGroupMessage(message: ChatMessage, groupId: number) {
+    this.send({
+      type: 'SEND_MESSAGE',
+      requestId: message.clientMessageId,
+      payload: {
+        clientMessageId: message.clientMessageId,
+        groupId,
+        conversationType: 'GROUP',
         content: message.content,
         messageType: message.messageType,
       },

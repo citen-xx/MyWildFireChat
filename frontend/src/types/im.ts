@@ -11,6 +11,24 @@ export interface DemoUser {
   label: string;
 }
 
+export interface GroupSummary {
+  groupId: number;
+  conversationId: number;
+  groupName: string;
+  role: 'OWNER' | 'MEMBER';
+  memberCount: number;
+  status: 'ACTIVE' | 'DISBANDED';
+}
+
+export interface GroupMemberView {
+  userId: number;
+  username: string;
+  role: 'OWNER' | 'MEMBER';
+  status: 'ACTIVE' | 'LEFT';
+  joinSequence: number;
+  leaveSequence?: number | null;
+}
+
 export type ConnectionStatus = 'Connecting' | 'Online' | 'Offline' | 'Reconnecting' | 'Syncing';
 
 export interface ChatMessage {
@@ -71,6 +89,15 @@ export interface SyncResponsePayload {
 export interface SyncCompletePayload {
   conversationId: number;
   nextSequence: number;
+}
+
+export interface CreateGroupRequest {
+  name: string;
+  memberIds: number[];
+}
+
+export interface AddGroupMembersRequest {
+  memberIds: number[];
 }
 
 export interface ErrorPayload {

@@ -50,6 +50,8 @@ message SendMessageRequest {
   int64 receiver_id = 2;
   string content = 3;
   string message_type = 4;
+  string conversation_type = 5;
+  int64 group_id = 6;
 }
 
 message SendResult {
