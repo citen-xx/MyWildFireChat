@@ -11,7 +11,7 @@ export interface DemoUser {
   label: string;
 }
 
-export type ConnectionStatus = 'Connecting' | 'Online' | 'Offline' | 'Reconnecting';
+export type ConnectionStatus = 'Connecting' | 'Online' | 'Offline' | 'Reconnecting' | 'Syncing';
 
 export interface ChatMessage {
   localId: string;
@@ -53,6 +53,24 @@ export interface MessageAckPayload {
   messageId: string;
   conversationId: number;
   sequence: number;
+}
+
+export interface SyncRequestPayload {
+  conversationId: number;
+  lastSequence: number;
+  limit: number;
+}
+
+export interface SyncResponsePayload {
+  conversationId: number;
+  messages: PushMessagePayload[];
+  hasMore: boolean;
+  nextSequence: number;
+}
+
+export interface SyncCompletePayload {
+  conversationId: number;
+  nextSequence: number;
 }
 
 export interface ErrorPayload {

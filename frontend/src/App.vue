@@ -9,9 +9,9 @@ import LoginView from './components/LoginView.vue';
 import ChatView from './components/ChatView.vue';
 import type { LoginResult } from './types/im';
 
-const savedToken = localStorage.getItem('im.token');
-const savedUserId = localStorage.getItem('im.userId');
-const savedUsername = localStorage.getItem('im.username');
+const savedToken = sessionStorage.getItem('im.token');
+const savedUserId = sessionStorage.getItem('im.userId');
+const savedUsername = sessionStorage.getItem('im.username');
 
 const currentUser = ref<LoginResult | null>(
   savedToken && savedUserId && savedUsername

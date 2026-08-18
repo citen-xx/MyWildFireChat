@@ -63,6 +63,16 @@ public class ConversationService {
         return "single:" + min + ":" + max;
     }
 
+    public boolean isMember(Long conversationId, Long userId) {
+        if (conversationId == null || conversationId <= 0 || userId == null || userId <= 0) {
+            return false;
+        }
+        Long count = memberMapper.selectCount(new LambdaQueryWrapper<ConversationMember>()
+                .eq(ConversationMember::getConversationId, conversationId)
+                .eq(ConversationMember::getUserId, userId));
+        return count != null && count > 0;
+    }
+
     private Conversation findByBizKey(String bizKey) {
         return conversationMapper.selectOne(new LambdaQueryWrapper<Conversation>()
                 .eq(Conversation::getBizKey, bizKey)

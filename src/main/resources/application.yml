@@ -43,4 +43,4 @@ im:
     retry-enabled: true
     retry-delays-millis: 3000,3000,5000
     scan-interval-millis: 1000
-    scan-limit: 10000
+    scan-limit: 100
