@@ -66,7 +66,7 @@ public final class ProtocolMessageFactory {
                 .setConversationId(result.conversationId())
                 .setSequence(result.sequence())
                 .setSenderId(result.senderId())
-                .setReceiverId(result.receiverId())
+                .setReceiverId(nullableReceiverId(result))
                 .setContent(result.content())
                 .setMessageType(result.messageType())
                 .setCreatedAt(result.createdAt())
@@ -115,10 +115,14 @@ public final class ProtocolMessageFactory {
                 .setConversationId(result.conversationId())
                 .setSequence(result.sequence())
                 .setSenderId(result.senderId())
-                .setReceiverId(result.receiverId())
+                .setReceiverId(nullableReceiverId(result))
                 .setContent(result.content())
                 .setMessageType(result.messageType())
                 .setCreatedAt(result.createdAt())
                 .build();
+    }
+
+    private static long nullableReceiverId(SendMessageResult result) {
+        return result.receiverId() == null ? 0L : result.receiverId();
     }
 }

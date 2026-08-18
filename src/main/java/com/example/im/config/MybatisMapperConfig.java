@@ -9,6 +9,7 @@ import org.springframework.context.annotation.Configuration;
 @MapperScan(basePackages = {
         "com.example.im.auth.repository",
         "com.example.im.conversation.repository",
+        "com.example.im.group.repository",
         "com.example.im.message.repository"
 })
 public class MybatisMapperConfig {

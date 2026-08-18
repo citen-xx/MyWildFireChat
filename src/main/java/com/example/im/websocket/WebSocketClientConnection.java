@@ -33,7 +33,7 @@ public class WebSocketClientConnection implements ClientConnection {
                 "conversationId", message.conversationId(),
                 "sequence", message.sequence(),
                 "senderId", message.senderId(),
-                "receiverId", message.receiverId(),
+                "receiverId", nullableReceiverId(message),
                 "content", message.content(),
                 "messageType", message.messageType(),
                 "createdAt", message.createdAt()));
@@ -104,9 +104,13 @@ public class WebSocketClientConnection implements ClientConnection {
                 "conversationId", message.conversationId(),
                 "sequence", message.sequence(),
                 "senderId", message.senderId(),
-                "receiverId", message.receiverId(),
+                "receiverId", nullableReceiverId(message),
                 "content", message.content(),
                 "messageType", message.messageType(),
                 "createdAt", message.createdAt());
+    }
+
+    private long nullableReceiverId(SendMessageResult message) {
+        return message.receiverId() == null ? 0L : message.receiverId();
     }
 }

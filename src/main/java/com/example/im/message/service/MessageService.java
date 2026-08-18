@@ -3,6 +3,8 @@ package com.example.im.message.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.im.conversation.model.Conversation;
 import com.example.im.conversation.service.ConversationService;
+import com.example.im.group.service.GroupSendContext;
+import com.example.im.group.service.GroupService;
 import com.example.im.message.model.ChatMessage;
 import com.example.im.message.repository.ChatMessageMapper;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -25,18 +27,26 @@ public class MessageService {
     private final ConversationService conversationService;
     private final ConversationSequenceGenerator sequenceGenerator;
     private final ChatMessageMapper messageMapper;
+    private final GroupService groupService;
 
     public MessageService(
             ConversationService conversationService,
             ConversationSequenceGenerator sequenceGenerator,
-            ChatMessageMapper messageMapper) {
+            ChatMessageMapper messageMapper,
+            GroupService groupService) {
         this.conversationService = conversationService;
         this.sequenceGenerator = sequenceGenerator;
         this.messageMapper = messageMapper;
+        this.groupService = groupService;
     }
 
     @Transactional
     public SendMessageResult sendSingleMessage(Long senderId, SendMessageCommand command) {
+        return sendMessage(senderId, command);
+    }
+
+    @Transactional
+    public SendMessageResult sendMessage(Long senderId, SendMessageCommand command) {
         validate(senderId, command);
 
         ChatMessage existing = findByClientMessageId(senderId, command.clientMessageId());
@@ -44,18 +54,16 @@ public class MessageService {
             return toResult(existing, true);
         }
 
-        Conversation conversation = conversationService.getOrCreateSingleConversation(
-                senderId,
-                command.receiverId());
-        long sequence = sequenceGenerator.nextSequence(conversation.getId());
+        ConversationTarget target = resolveTarget(senderId, command);
+        long sequence = sequenceGenerator.nextSequence(target.conversationId());
 
         ChatMessage message = new ChatMessage();
         message.setMessageId(newMessageId());
         message.setClientMessageId(command.clientMessageId());
-        message.setConversationId(conversation.getId());
+        message.setConversationId(target.conversationId());
         message.setSequence(sequence);
         message.setSenderId(senderId);
-        message.setReceiverId(command.receiverId());
+        message.setReceiverId(target.receiverId());
         message.setContent(command.content());
         message.setMessageType(command.messageType());
         message.setCreatedAt(LocalDateTime.now());
@@ -70,6 +78,14 @@ public class MessageService {
             }
             return toResult(concurrent, true);
         }
+    }
+
+    public List<Long> deliveryTargets(Long senderId, SendMessageCommand command, SendMessageResult result) {
+        String conversationType = normalizedConversationType(command);
+        if (ConversationService.TYPE_GROUP.equals(conversationType)) {
+            return groupService.requireSendContext(command.groupId(), senderId).activeMemberIds();
+        }
+        return List.of(result.receiverId());
     }
 
     public ChatMessage findByClientMessageId(Long senderId, String clientMessageId) {
@@ -87,6 +103,17 @@ public class MessageService {
                 .eq(ChatMessage::getMessageId, messageId)
                 .last("limit 1"));
         return Optional.ofNullable(message).map(item -> toResult(item, true));
+    }
+
+    public long findConversationMaxSequence(Long conversationId) {
+        if (conversationId == null || conversationId <= 0) {
+            throw new IllegalArgumentException("conversationId is required");
+        }
+        ChatMessage message = messageMapper.selectOne(new LambdaQueryWrapper<ChatMessage>()
+                .eq(ChatMessage::getConversationId, conversationId)
+                .orderByDesc(ChatMessage::getSequence)
+                .last("limit 1"));
+        return message == null || message.getSequence() == null ? 0L : message.getSequence();
     }
 
     public List<SendMessageResult> findConversationMessagesAfter(
@@ -122,8 +149,17 @@ public class MessageService {
         if (command.clientMessageId() == null || command.clientMessageId().isBlank()) {
             throw new IllegalArgumentException("clientMessageId is required");
         }
-        if (command.receiverId() == null || command.receiverId() <= 0) {
-            throw new IllegalArgumentException("receiverId is required");
+        String conversationType = normalizedConversationType(command);
+        if (ConversationService.TYPE_GROUP.equals(conversationType)) {
+            if (command.groupId() == null || command.groupId() <= 0) {
+                throw new IllegalArgumentException("groupId is required");
+            }
+        } else if (ConversationService.TYPE_DIRECT.equals(conversationType)) {
+            if (command.receiverId() == null || command.receiverId() <= 0) {
+                throw new IllegalArgumentException("receiverId is required");
+            }
+        } else {
+            throw new IllegalArgumentException("conversationType is invalid");
         }
         if (command.content() == null || command.content().isBlank()) {
             throw new IllegalArgumentException("content is required");
@@ -135,6 +171,25 @@ public class MessageService {
 
     private String newMessageId() {
         return "msg_" + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private ConversationTarget resolveTarget(Long senderId, SendMessageCommand command) {
+        String conversationType = normalizedConversationType(command);
+        if (ConversationService.TYPE_GROUP.equals(conversationType)) {
+            GroupSendContext context = groupService.requireSendContext(command.groupId(), senderId);
+            return new ConversationTarget(context.conversationId(), null);
+        }
+        Conversation conversation = conversationService.getOrCreateSingleConversation(
+                senderId,
+                command.receiverId());
+        return new ConversationTarget(conversation.getId(), command.receiverId());
+    }
+
+    private String normalizedConversationType(SendMessageCommand command) {
+        if (command.conversationType() == null || command.conversationType().isBlank()) {
+            return ConversationService.TYPE_DIRECT;
+        }
+        return command.conversationType().trim().toUpperCase();
     }
 
     private SendMessageResult toResult(ChatMessage message, boolean duplicate) {
@@ -149,5 +204,8 @@ public class MessageService {
                 message.getMessageType(),
                 message.getCreatedAt().atZone(SYSTEM_ZONE).toInstant().toEpochMilli(),
                 duplicate);
+    }
+
+    private record ConversationTarget(Long conversationId, Long receiverId) {
     }
 }

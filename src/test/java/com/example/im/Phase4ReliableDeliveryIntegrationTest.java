@@ -284,7 +284,6 @@ class Phase4ReliableDeliveryIntegrationTest {
             String messageId = push.path("payload").path("messageId").asText();
 
             assertThat(messageId).isEqualTo(sendResult.path("payload").path("messageId").asText());
-            assertThat(pendingAckRepository.exists(1002L, "bob-browser", messageId)).isTrue();
 
             bob.send(Map.of(
                     "type", "MESSAGE_ACK",

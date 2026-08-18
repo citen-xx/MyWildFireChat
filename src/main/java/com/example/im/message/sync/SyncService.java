@@ -1,5 +1,6 @@
 package com.example.im.message.sync;
 
+import com.example.im.conversation.model.ConversationMember;
 import com.example.im.conversation.service.ConversationService;
 import com.example.im.message.service.MessageService;
 import com.example.im.message.service.SendMessageResult;
@@ -30,24 +31,28 @@ public class SyncService {
         validate(userId, command);
         int limit = normalizeLimit(command.limit());
 
-        if (!conversationService.isMember(command.conversationId(), userId)) {
+        ConversationMember member = conversationService.findActiveMember(command.conversationId(), userId)
+                .orElse(null);
+        if (member == null) {
             log.info("sync denied userId={} deviceId={} conversationId={} fromSequence={} count={}",
                     userId, deviceId, command.conversationId(), command.lastSequence(), 0);
             throw new IllegalArgumentException("user is not a member of the conversation");
         }
 
+        long effectiveLastSequence = Math.max(command.lastSequence(),
+                member.getJoinSequence() == null ? 0L : member.getJoinSequence());
         List<SendMessageResult> rows = messageService.findConversationMessagesAfter(
                 command.conversationId(),
-                command.lastSequence(),
+                effectiveLastSequence,
                 limit + 1);
         boolean hasMore = rows.size() > limit;
         List<SendMessageResult> page = hasMore ? rows.subList(0, limit) : rows;
         long nextSequence = page.isEmpty()
-                ? command.lastSequence()
+                ? effectiveLastSequence
                 : page.get(page.size() - 1).sequence();
 
         log.info("sync result userId={} deviceId={} conversationId={} fromSequence={} count={}",
-                userId, deviceId, command.conversationId(), command.lastSequence(), page.size());
+                userId, deviceId, command.conversationId(), effectiveLastSequence, page.size());
         return new SyncResult(command.conversationId(), page, hasMore, nextSequence);
     }
 

@@ -85,11 +85,13 @@ public class MessageHandler extends SimpleChannelInboundHandler<MessageEnvelope>
             SendMessageCommand command = new SendMessageCommand(
                     request.getClientMessageId(),
                     request.getReceiverId(),
+                    request.getGroupId(),
+                    request.getConversationType(),
                     request.getContent(),
                     request.getMessageType());
-            SendMessageResult result = messageService.sendSingleMessage(session.userId(), command);
+            SendMessageResult result = messageService.sendMessage(session.userId(), command);
             context.writeAndFlush(ProtocolMessageFactory.sendResult(envelope.getRequestId(), result));
-            deliveryService.pushToLocalReceiverDevices(result);
+            deliveryService.pushToUserDevices(result, messageService.deliveryTargets(session.userId(), command, result));
         } catch (IllegalArgumentException exception) {
             context.writeAndFlush(ProtocolMessageFactory.error(
                     envelope.getRequestId(),

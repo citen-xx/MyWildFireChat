@@ -139,16 +139,18 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
             SendMessageCommand command = new SendMessageCommand(
                     text(payload, "clientMessageId"),
                     payload.path("receiverId").asLong(),
+                    payload.path("groupId").asLong(),
+                    text(payload, "conversationType"),
                     text(payload, "content"),
                     text(payload, "messageType"));
-            SendMessageResult result = messageService.sendSingleMessage(imSession.userId(), command);
+            SendMessageResult result = messageService.sendMessage(imSession.userId(), command);
             connection.sendJson("SEND_RESULT", requestId, Map.of(
                     "clientMessageId", result.clientMessageId(),
                     "messageId", result.messageId(),
                     "conversationId", result.conversationId(),
                     "sequence", result.sequence(),
                     "createdAt", result.createdAt()));
-            deliveryService.pushToLocalReceiverDevices(result);
+            deliveryService.pushToUserDevices(result, messageService.deliveryTargets(imSession.userId(), command, result));
         } catch (IllegalArgumentException exception) {
             connection.sendJson("ERROR", requestId, Map.of(
                     "code", "INVALID_SEND_MESSAGE",
