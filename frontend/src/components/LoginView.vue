@@ -38,9 +38,9 @@ async function submit() {
   loading.value = true;
   try {
     const result = await login(username.value.trim(), password.value);
-    localStorage.setItem('im.token', result.token);
-    localStorage.setItem('im.userId', String(result.userId));
-    localStorage.setItem('im.username', result.username);
+    sessionStorage.setItem('im.token', result.token);
+    sessionStorage.setItem('im.userId', String(result.userId));
+    sessionStorage.setItem('im.username', result.username);
     emit('authenticated', result);
   } catch {
     error.value = 'Login failed';

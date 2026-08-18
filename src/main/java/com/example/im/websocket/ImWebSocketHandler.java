@@ -8,6 +8,9 @@ import com.example.im.message.service.MessageDeliveryService;
 import com.example.im.message.service.MessageService;
 import com.example.im.message.service.SendMessageCommand;
 import com.example.im.message.service.SendMessageResult;
+import com.example.im.message.sync.SyncCommand;
+import com.example.im.message.sync.SyncResult;
+import com.example.im.message.sync.SyncService;
 import com.example.im.netty.session.ImSession;
 import com.example.im.netty.session.SessionManager;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -34,6 +37,7 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
     private final MessageService messageService;
     private final MessageDeliveryService deliveryService;
     private final AckService ackService;
+    private final SyncService syncService;
 
     public ImWebSocketHandler(
             ObjectMapper objectMapper,
@@ -41,13 +45,15 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
             SessionManager sessionManager,
             MessageService messageService,
             MessageDeliveryService deliveryService,
-            AckService ackService) {
+            AckService ackService,
+            SyncService syncService) {
         this.objectMapper = objectMapper;
         this.jwtService = jwtService;
         this.sessionManager = sessionManager;
         this.messageService = messageService;
         this.deliveryService = deliveryService;
         this.ackService = ackService;
+        this.syncService = syncService;
     }
 
     @Override
@@ -81,6 +87,11 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
 
         if ("MESSAGE_ACK".equals(type)) {
             handleMessageAck(connection, imSession, root.path("payload"), requestId);
+            return;
+        }
+
+        if ("SYNC_REQUEST".equals(type)) {
+            handleSyncRequest(connection, imSession, root.path("payload"), requestId);
             return;
         }
 
@@ -164,6 +175,32 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
             connection.sendJson("ERROR", requestId, Map.of(
                     "code", "MESSAGE_ACK_FAILED",
                     "message", "failed to process acknowledgement"));
+        }
+    }
+
+    private void handleSyncRequest(
+            WebSocketClientConnection connection,
+            ImSession imSession,
+            JsonNode payload,
+            String requestId) {
+        try {
+            SyncCommand command = new SyncCommand(
+                    payload.path("conversationId").asLong(),
+                    payload.path("lastSequence").asLong(),
+                    payload.has("limit") ? payload.path("limit").asInt() : null);
+            SyncResult result = syncService.sync(imSession.userId(), imSession.deviceId(), command);
+            connection.sendSyncResponse(requestId, result);
+            if (!result.hasMore()) {
+                connection.sendSyncComplete(requestId, result.conversationId(), result.nextSequence());
+            }
+        } catch (IllegalArgumentException exception) {
+            connection.sendJson("ERROR", requestId, Map.of(
+                    "code", "INVALID_SYNC_REQUEST",
+                    "message", exception.getMessage()));
+        } catch (Exception exception) {
+            connection.sendJson("ERROR", requestId, Map.of(
+                    "code", "SYNC_REQUEST_FAILED",
+                    "message", "failed to sync messages"));
         }
     }
 

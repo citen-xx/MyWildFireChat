@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -86,6 +87,29 @@ public class MessageService {
                 .eq(ChatMessage::getMessageId, messageId)
                 .last("limit 1"));
         return Optional.ofNullable(message).map(item -> toResult(item, true));
+    }
+
+    public List<SendMessageResult> findConversationMessagesAfter(
+            Long conversationId,
+            long lastSequence,
+            int limit) {
+        if (conversationId == null || conversationId <= 0) {
+            throw new IllegalArgumentException("conversationId is required");
+        }
+        if (lastSequence < 0) {
+            throw new IllegalArgumentException("lastSequence must be greater than or equal to 0");
+        }
+        if (limit <= 0) {
+            throw new IllegalArgumentException("limit must be greater than 0");
+        }
+        return messageMapper.selectList(new LambdaQueryWrapper<ChatMessage>()
+                        .eq(ChatMessage::getConversationId, conversationId)
+                        .gt(ChatMessage::getSequence, lastSequence)
+                        .orderByAsc(ChatMessage::getSequence)
+                        .last("limit " + limit))
+                .stream()
+                .map(item -> toResult(item, true))
+                .toList();
     }
 
     private void validate(Long senderId, SendMessageCommand command) {

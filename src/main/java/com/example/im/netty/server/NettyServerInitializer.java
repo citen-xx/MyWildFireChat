@@ -25,18 +25,21 @@ public class NettyServerInitializer extends ChannelInitializer<SocketChannel> {
     private final HeartbeatHandler heartbeatHandler;
     private final MessageHandler messageHandler;
     private final SessionCleanupHandler sessionCleanupHandler;
+    private final NettyBusinessExecutorGroup businessExecutorGroup;
 
     public NettyServerInitializer(
             NettyProperties properties,
             AuthHandler authHandler,
             HeartbeatHandler heartbeatHandler,
             MessageHandler messageHandler,
-            SessionCleanupHandler sessionCleanupHandler) {
+            SessionCleanupHandler sessionCleanupHandler,
+            NettyBusinessExecutorGroup businessExecutorGroup) {
         this.properties = properties;
         this.authHandler = authHandler;
         this.heartbeatHandler = heartbeatHandler;
         this.messageHandler = messageHandler;
         this.sessionCleanupHandler = sessionCleanupHandler;
+        this.businessExecutorGroup = businessExecutorGroup;
     }
 
     @Override
@@ -51,7 +54,7 @@ public class NettyServerInitializer extends ChannelInitializer<SocketChannel> {
                 properties.getReaderIdleSeconds(), 0, 0, TimeUnit.SECONDS));
         pipeline.addLast("authHandler", authHandler);
         pipeline.addLast("heartbeatHandler", heartbeatHandler);
-        pipeline.addLast("messageHandler", messageHandler);
+        pipeline.addLast(businessExecutorGroup.delegate(), "messageHandler", messageHandler);
         pipeline.addLast("sessionCleanupHandler", sessionCleanupHandler);
     }
 }

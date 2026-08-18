@@ -1,6 +1,7 @@
 package com.example.im.websocket;
 
 import com.example.im.message.service.SendMessageResult;
+import com.example.im.message.sync.SyncResult;
 import com.example.im.netty.session.ClientConnection;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.web.socket.CloseStatus;
@@ -36,6 +37,22 @@ public class WebSocketClientConnection implements ClientConnection {
                 "content", message.content(),
                 "messageType", message.messageType(),
                 "createdAt", message.createdAt()));
+    }
+
+    public void sendSyncResponse(String requestId, SyncResult result) {
+        sendJson("SYNC_RESPONSE", requestId, Map.of(
+                "conversationId", result.conversationId(),
+                "messages", result.messages().stream()
+                        .map(this::messagePayload)
+                        .toList(),
+                "hasMore", result.hasMore(),
+                "nextSequence", result.nextSequence()));
+    }
+
+    public void sendSyncComplete(String requestId, Long conversationId, long nextSequence) {
+        sendJson("SYNC_COMPLETE", requestId, Map.of(
+                "conversationId", conversationId,
+                "nextSequence", nextSequence));
     }
 
     public void sendJson(String type, String requestId, Object payload) {
@@ -78,5 +95,18 @@ public class WebSocketClientConnection implements ClientConnection {
             String requestId,
             long timestamp,
             Object payload) {
+    }
+
+    private Map<String, Object> messagePayload(SendMessageResult message) {
+        return Map.of(
+                "clientMessageId", message.clientMessageId(),
+                "messageId", message.messageId(),
+                "conversationId", message.conversationId(),
+                "sequence", message.sequence(),
+                "senderId", message.senderId(),
+                "receiverId", message.receiverId(),
+                "content", message.content(),
+                "messageType", message.messageType(),
+                "createdAt", message.createdAt());
     }
 }

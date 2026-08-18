@@ -5,6 +5,8 @@ import type {
   MessageAckPayload,
   PushMessagePayload,
   SendResultPayload,
+  SyncRequestPayload,
+  SyncResponsePayload,
   WsEnvelope,
 } from '../types/im';
 
@@ -12,9 +14,16 @@ interface ImSocketOptions {
   token: string;
   deviceId: string;
   onStatusChange: (status: ConnectionStatus) => void;
+  onConnected: () => void;
   onPushMessage: (message: PushMessagePayload) => void;
   onSendResult: (result: SendResultPayload) => void;
+  onSyncComplete: (conversationId: number, nextSequence: number) => void;
   onError: (error: ErrorPayload) => void;
+}
+
+interface PendingSyncRequest {
+  resolve: (payload: SyncResponsePayload) => void;
+  reject: (reason: Error) => void;
 }
 
 export class ImSocket {
@@ -22,12 +31,15 @@ export class ImSocket {
   private retryCount = 0;
   private readonly maxRetries = 5;
   private heartbeatTimer?: number;
+  private reconnectTimer?: number;
   private manuallyClosed = false;
+  private readonly pendingSyncRequests = new Map<string, PendingSyncRequest>();
 
   constructor(private readonly options: ImSocketOptions) {}
 
   connect() {
     this.manuallyClosed = false;
+    this.clearReconnectTimer();
     this.options.onStatusChange(this.retryCount === 0 ? 'Connecting' : 'Reconnecting');
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -64,8 +76,26 @@ export class ImSocket {
     });
   }
 
+  requestSyncPage(payload: SyncRequestPayload) {
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error('WebSocket is not open'));
+    }
+    const requestId = crypto.randomUUID();
+    this.send({
+      type: 'SYNC_REQUEST',
+      requestId,
+      payload,
+    });
+
+    return new Promise<SyncResponsePayload>((resolve, reject) => {
+      this.pendingSyncRequests.set(requestId, { resolve, reject });
+    });
+  }
+
   close() {
     this.manuallyClosed = true;
+    this.clearReconnectTimer();
+    this.rejectPendingSyncRequests('WebSocket closed');
     this.stopHeartbeat();
     this.socket?.close();
     this.options.onStatusChange('Offline');
@@ -75,7 +105,7 @@ export class ImSocket {
     const envelope = JSON.parse(raw) as WsEnvelope;
     if (envelope.type === 'CONNECT_ACK') {
       this.retryCount = 0;
-      this.options.onStatusChange('Online');
+      this.options.onConnected();
       return;
     }
     if (envelope.type === 'PONG') {
@@ -89,7 +119,17 @@ export class ImSocket {
       this.handlePushMessage(envelope.payload as PushMessagePayload);
       return;
     }
+    if (envelope.type === 'SYNC_RESPONSE') {
+      this.resolveSyncResponse(envelope);
+      return;
+    }
+    if (envelope.type === 'SYNC_COMPLETE') {
+      const payload = envelope.payload as { conversationId: number; nextSequence: number };
+      this.options.onSyncComplete(payload.conversationId, payload.nextSequence);
+      return;
+    }
     if (envelope.type === 'ERROR') {
+      this.rejectSyncError(envelope);
       this.options.onError(envelope.payload as ErrorPayload);
     }
   }
@@ -113,6 +153,7 @@ export class ImSocket {
 
   private handleClose() {
     this.stopHeartbeat();
+    this.rejectPendingSyncRequests('WebSocket closed');
     if (this.manuallyClosed) {
       this.options.onStatusChange('Offline');
       return;
@@ -123,7 +164,8 @@ export class ImSocket {
     }
     this.retryCount += 1;
     this.options.onStatusChange('Reconnecting');
-    window.setTimeout(() => this.connect(), 3000);
+    this.clearReconnectTimer();
+    this.reconnectTimer = window.setTimeout(() => this.connect(), 3000);
   }
 
   private startHeartbeat() {
@@ -138,6 +180,41 @@ export class ImSocket {
       window.clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
     }
+  }
+
+  private clearReconnectTimer() {
+    if (this.reconnectTimer) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+  }
+
+  private resolveSyncResponse(envelope: WsEnvelope) {
+    const requestId = envelope.requestId ?? '';
+    const pending = this.pendingSyncRequests.get(requestId);
+    if (!pending) {
+      return;
+    }
+    this.pendingSyncRequests.delete(requestId);
+    pending.resolve(envelope.payload as SyncResponsePayload);
+  }
+
+  private rejectSyncError(envelope: WsEnvelope) {
+    const requestId = envelope.requestId ?? '';
+    const pending = this.pendingSyncRequests.get(requestId);
+    if (!pending) {
+      return;
+    }
+    this.pendingSyncRequests.delete(requestId);
+    const error = envelope.payload as ErrorPayload;
+    pending.reject(new Error(`${error.code}: ${error.message}`));
+  }
+
+  private rejectPendingSyncRequests(message: string) {
+    for (const pending of this.pendingSyncRequests.values()) {
+      pending.reject(new Error(message));
+    }
+    this.pendingSyncRequests.clear();
   }
 
   private send(message: Record<string, unknown>) {

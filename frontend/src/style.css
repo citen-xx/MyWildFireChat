@@ -128,6 +128,7 @@ button:disabled {
 }
 
 .status.connecting,
+.status.syncing,
 .status.reconnecting {
   background: #fef3c7;
   color: #92400e;
@@ -188,6 +189,12 @@ button:disabled {
   min-height: 0;
   overflow-y: auto;
   padding: 20px;
+}
+
+.syncing-text {
+  margin: 0 0 12px;
+  color: #92400e;
+  font-size: 13px;
 }
 
 .message-row {

@@ -5,9 +5,13 @@ import com.example.im.message.service.MessageDeliveryService;
 import com.example.im.message.service.SendMessageCommand;
 import com.example.im.message.service.MessageService;
 import com.example.im.message.service.SendMessageResult;
+import com.example.im.message.sync.SyncCommand;
+import com.example.im.message.sync.SyncResult;
+import com.example.im.message.sync.SyncService;
 import com.example.im.netty.protocol.ImProtocol.MessageEnvelope;
 import com.example.im.netty.protocol.ImProtocol.MessageAck;
 import com.example.im.netty.protocol.ImProtocol.SendMessageRequest;
+import com.example.im.netty.protocol.ImProtocol.SyncRequest;
 import com.example.im.netty.session.ImSession;
 import com.example.im.netty.session.SessionManager;
 import io.netty.channel.ChannelHandler.Sharable;
@@ -28,16 +32,19 @@ public class MessageHandler extends SimpleChannelInboundHandler<MessageEnvelope>
     private final ObjectProvider<MessageService> messageServiceProvider;
     private final ObjectProvider<MessageDeliveryService> deliveryServiceProvider;
     private final ObjectProvider<AckService> ackServiceProvider;
+    private final ObjectProvider<SyncService> syncServiceProvider;
 
     public MessageHandler(
             SessionManager sessionManager,
             ObjectProvider<MessageService> messageServiceProvider,
             ObjectProvider<MessageDeliveryService> deliveryServiceProvider,
-            ObjectProvider<AckService> ackServiceProvider) {
+            ObjectProvider<AckService> ackServiceProvider,
+            ObjectProvider<SyncService> syncServiceProvider) {
         this.sessionManager = sessionManager;
         this.messageServiceProvider = messageServiceProvider;
         this.deliveryServiceProvider = deliveryServiceProvider;
         this.ackServiceProvider = ackServiceProvider;
+        this.syncServiceProvider = syncServiceProvider;
     }
 
     @Override
@@ -49,6 +56,11 @@ public class MessageHandler extends SimpleChannelInboundHandler<MessageEnvelope>
 
         if (envelope.getMessageType() == MessageEnvelope.MessageType.MESSAGE_ACK) {
             handleMessageAck(context, envelope);
+            return;
+        }
+
+        if (envelope.getMessageType() == MessageEnvelope.MessageType.SYNC_REQUEST) {
+            handleSyncRequest(context, envelope);
             return;
         }
 
@@ -117,6 +129,45 @@ public class MessageHandler extends SimpleChannelInboundHandler<MessageEnvelope>
                     envelope.getRequestId(),
                     "MESSAGE_ACK_FAILED",
                     "failed to process acknowledgement"));
+        }
+    }
+
+    private void handleSyncRequest(ChannelHandlerContext context, MessageEnvelope envelope) {
+        try {
+            ImSession session = sessionManager.getSession(context.channel())
+                    .orElseThrow(() -> new IllegalStateException("channel is not authenticated"));
+            SyncService syncService = syncServiceProvider.getIfAvailable();
+            if (syncService == null) {
+                context.writeAndFlush(ProtocolMessageFactory.error(
+                        envelope.getRequestId(),
+                        "SYNC_DISABLED",
+                        "message sync is disabled"));
+                return;
+            }
+            SyncRequest request = SyncRequest.parseFrom(envelope.getPayload());
+            SyncCommand command = new SyncCommand(
+                    request.getConversationId(),
+                    request.getLastSequence(),
+                    request.hasLimit() ? request.getLimit() : null);
+            SyncResult result = syncService.sync(session.userId(), session.deviceId(), command);
+            context.writeAndFlush(ProtocolMessageFactory.syncResponse(envelope.getRequestId(), result));
+            if (!result.hasMore()) {
+                context.writeAndFlush(ProtocolMessageFactory.syncComplete(
+                        envelope.getRequestId(),
+                        result.conversationId(),
+                        result.nextSequence()));
+            }
+        } catch (IllegalArgumentException exception) {
+            context.writeAndFlush(ProtocolMessageFactory.error(
+                    envelope.getRequestId(),
+                    "INVALID_SYNC_REQUEST",
+                    exception.getMessage()));
+        } catch (Exception exception) {
+            log.warn("Failed to handle SYNC_REQUEST", exception);
+            context.writeAndFlush(ProtocolMessageFactory.error(
+                    envelope.getRequestId(),
+                    "SYNC_REQUEST_FAILED",
+                    "failed to sync messages"));
         }
     }
 

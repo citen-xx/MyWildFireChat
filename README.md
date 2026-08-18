@@ -6,8 +6,8 @@
 WildfireChat 的长连接、会话、投递和同步设计思想，但不复制其源码、
 包名、MQTT 协议或工程结构。
 
-当前已完成 Phase 4：在 Phase 3 基础上实现接收方 `MESSAGE_ACK`、设备级
-Pending ACK、超时重投和客户端重复 Push 去重。
+当前已完成 Phase 5：在 Phase 4 基础上实现断线重连后的
+Conversation Sequence 增量同步、分页、权限校验和客户端连续游标。
 
 ## Architecture
 
@@ -28,7 +28,7 @@ REST Client
   -> Application Service
 ```
 
-Phase 4 完成单节点在线可靠投递。离线同步、Redis route、RabbitMQ 跨节点
+Phase 5 完成单节点在线可靠投递和断线恢复。Redis route、RabbitMQ 跨节点
 转发会在后续阶段逐步完成。
 
 ## 模块说明
@@ -109,7 +109,7 @@ Phase 1 只提供 Docker Compose RabbitMQ。Phase 8 中 RabbitMQ 只用于跨 IM
 - `PING`, `PONG`
 - `SEND_MESSAGE`, `SEND_RESULT`, `PUSH_MESSAGE`
 - `MESSAGE_ACK`
-- `SYNC_REQUEST`, `SYNC_RESPONSE`
+- `SYNC_REQUEST`, `SYNC_RESPONSE`, `SYNC_COMPLETE`
 - `ERROR`
 
 Phase 2 已实现 payload：
@@ -127,6 +127,12 @@ Phase 3 已实现 payload：
 Phase 4 已实现 payload：
 
 - `MessageAck(messageId, conversationId, sequence)`
+
+Phase 5 已实现 payload：
+
+- `SyncRequest(conversationId, lastSequence, optional limit)`
+- `SyncResponse(conversationId, messages, hasMore, nextSequence)`
+- `SyncComplete(conversationId, nextSequence)`
 
 `SendResult` 只表示服务端已经成功接收并持久化，不表示接收方已经收到。
 `MessageAck` 表示接收方某个 `userId + deviceId` 连接已经收到并处理了
@@ -306,7 +312,7 @@ initial push
   -> stop online retry
 ```
 
-停止在线重试不代表消息丢失，消息已经在 MySQL 中。Phase 5 会用
+停止在线重试不代表消息丢失，消息已经在 MySQL 中。Phase 5 使用
 Conversation Sequence 增量同步补偿断线和离线期间的消息。
 
 如果设备断开连接，调度器会删除该设备的 Pending ACK，停止即时重投，等待
@@ -343,10 +349,69 @@ Redis 和 MySQL 之间不是强一致事务：Redis INCR 成功后，MySQL 可�
 
 ## 离线同步机制
 
-TODO: Phase 5 实现。
+Phase 5 不创建单独的“离线消息副本表”。所有消息统一保存在 `message` 表，
+客户端根据每个 Conversation 的连续游标请求缺口：
 
-客户端发送 `SYNC_REQUEST(conversationId, lastSequence, limit)`，服务端查询
-`sequence > lastSequence` 的消息，按 sequence 升序返回，单页最多 100 条。
+```sql
+SELECT ...
+FROM message
+WHERE conversation_id = ?
+  AND sequence > ?
+ORDER BY sequence ASC
+LIMIT ?
+```
+
+TCP 和 WebSocket 在鉴权完成后都支持：
+
+```text
+SYNC_REQUEST
+  -> SYNC_RESPONSE
+  -> (hasMore = false) SYNC_COMPLETE
+```
+
+默认单页 100 条，最大 200 条。客户端请求超过 200 时服务端限制为 200，
+避免一次读取无限历史。`SYNC_RESPONSE.nextSequence` 是当前页最后一条消息的
+sequence；客户端用它请求下一页。没有新增消息时，`nextSequence` 保持请求中的
+`lastSequence`。
+
+服务端先校验当前 CONNECT Session 的 userId 是否属于该 Conversation，再执行
+查询，不能相信客户端传入的 userId，也不会把不存在的 Conversation 与无权限
+Conversation 的差异暴露给客户端。
+
+Web 前端为每个 `userId + deviceId + conversationId` 保存游标：
+
+```text
+im:conversations:{userId}:{deviceId}
+im:cursor:{userId}:{deviceId}:{conversationId}
+```
+
+游标使用 contiguous sequence，而不是简单的最大 sequence。收到 `103` 但
+尚未收到 `102` 时，客户端暂存 `103`，游标仍停在 `101`；收到 `102` 后再
+连续推进到 `103`。PUSH 和 SYNC 都经过 messageId 去重，并按 sequence 排序。
+
+重连流程是：
+
+```text
+WebSocket open
+  -> CONNECT
+  -> CONNECT_ACK
+  -> SYNC_REQUEST
+  -> SYNC_RESPONSE / SYNC_COMPLETE
+  -> Online
+```
+
+同步历史消息不会创建 `Pending ACK`。在线消息使用 `PUSH_MESSAGE + MESSAGE_ACK`
+和有限重试；断线或离线消息使用 MySQL 持久化和 Sequence Sync。这两套机制互补：
+
+- ACK 解决在线实时 Push 是否被某个设备接收，不能覆盖断线期间尚未 Push 的消息。
+- Sequence Sync 解决断线、重启和 ACK 丢失后的消息缺口，但它是重新连接后的主动
+  拉取，不能替代在线投递的低延迟确认和有限重试。
+
+当前没有服务端 `device_conversation_cursor` 表，游标由客户端 localStorage
+维护。这样实现简单、写放大较小，但清理浏览器数据会丢失游标，需要重新拉取历史。
+首次打开尚未记录的 Conversation 也暂时从 sequence 0 开始，没有做“优先最近 N 条”
+的历史加载优化。前端消息状态还没有 IndexedDB 持久化，因此当前 ACK 仍表示
+“页面进程已接收并处理”，不代表消息已经永久写入客户端磁盘。
 
 ## 多节点路由
 
@@ -376,7 +441,9 @@ WebSocket 地址：
 ws://localhost:8080/ws/im
 ```
 
-选择 Spring WebSocket 挂在 8080，是因为当前项目已经有 Spring Boot Web。
+开发环境前端从 `http://localhost:5173` 访问时，Vite 会把 `/ws/im` 代理到
+后端 `ws://localhost:8080/ws/im`。直接连接后端时使用上面的地址。选择 Spring
+WebSocket 挂在 8080，是因为当前项目已经有 Spring Boot Web。
 这样浏览器 WebSocket 可以直接注入并复用 `JwtService`、`SessionManager`、
 `MessageService`、`ConversationService`，不需要再启动一个独立的 Netty
 WebSocket Server，也不会复制一套聊天业务。
@@ -411,6 +478,9 @@ WebSocket JSON 协议：
 - `SEND_RESULT`: 服务端已接收并持久化
 - `PUSH_MESSAGE`: 在线接收方收到推送
 - `MESSAGE_ACK`: 浏览器收到 `PUSH_MESSAGE` 后发回的接收方确认
+- `SYNC_REQUEST`: CONNECT_ACK 后按 Conversation 游标请求增量消息
+- `SYNC_RESPONSE`: 返回一页按 sequence 升序排列的历史消息
+- `SYNC_COMPLETE`: 当前 Conversation 没有更多待同步消息
 - `ERROR`: 协议或鉴权错误
 - `PONG`: 心跳响应
 
@@ -492,7 +562,9 @@ Web 聊天测试：
 4. Bob 页面实时出现 Alice 的消息
 5. Bob 回复 `hello alice`
 6. Alice 页面实时收到 Bob 的消息
-7. 关闭 Bob 页面后，Alice 继续发送消息；当前 Phase 3 只保证消息落库，不做离线补偿
+7. 关闭 Bob 页面后，Alice 继续发送消息
+8. Bob 重新登录后，CONNECT_ACK 之后会自动同步已知 Conversation 的缺失消息
+9. 同步中的消息按 sequence 排序，重复的 PUSH/SYNC messageId 不会重复展示
 
 当前 Phase 2/3 的 Netty 验证主要通过集成测试完成：测试会启动真实 Netty
 客户端，完成登录、CONNECT、SEND_MESSAGE、SEND_RESULT、PUSH_MESSAGE 和
@@ -531,6 +603,10 @@ Phase 3 测试覆盖：
 - `SEND_RESULT` 与接收方 `MESSAGE_ACK` 语义独立
 - 同一用户多个 deviceId 独立维护 Pending ACK
 - WebSocket `MESSAGE_ACK` 复用同一套 ACK 服务
+- Bob 离线期间 Alice 发送消息，Bob 重连后通过 TCP `SYNC_REQUEST` 恢复
+- SYNC 分页、`hasMore`、`nextSequence` 和超过最大 limit 的限制
+- 非成员、非法 sequence、非法 limit 不能读取 Conversation 历史
+- WebSocket `SYNC_REQUEST` 复用同一套 `SyncService`
 
 ## 当前限制
 
@@ -538,14 +614,15 @@ Phase 3 测试覆盖：
 - 当前只实现单进程内存 Session，Redis route 还未实现
 - Phase 3 集成测试使用 H2 MySQL mode；生产运行配置仍使用 MySQL
 - Web 前端使用固定 Demo User List: Alice/Bob，不是好友系统
-- 已实现在线接收方 ACK 和有限重投，但未实现离线同步
-- 未实现群聊、多端同步、Redis route、RabbitMQ 跨节点转发
+- 已实现在线接收方 ACK、有限重投和单节点离线增量同步
+- 未实现群聊、服务端设备游标、多端跨设备同步进度、Redis route、RabbitMQ 跨节点转发
 - 当前 CLI 客户端尚未提供
 - Redis Pending ACK 的多 Worker Claim Lock 暂未实现，当前按单节点扫描器设计
+- 前端自动同步的 Conversation 列表来自本地 localStorage，第一次打开未知 Conversation
+  不会自动发现全部历史会话
 
 ## TODO
 
-- Phase 5: 离线消息和 `SYNC_REQUEST`
 - Phase 6: 群聊
 - Phase 7: Redis route 和多节点启动
 - Phase 8: RabbitMQ 跨节点转发

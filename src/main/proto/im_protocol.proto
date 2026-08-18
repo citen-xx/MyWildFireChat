@@ -20,6 +20,7 @@ message MessageEnvelope {
     ERROR = 9;
     PUSH_MESSAGE = 10;
     SEND_RESULT = 11;
+    SYNC_COMPLETE = 12;
   }
 
   MessageType message_type = 1;
@@ -75,4 +76,22 @@ message MessageAck {
   string message_id = 1;
   int64 conversation_id = 2;
   int64 sequence = 3;
+}
+
+message SyncRequest {
+  int64 conversation_id = 1;
+  int64 last_sequence = 2;
+  optional int32 limit = 3;
+}
+
+message SyncResponse {
+  int64 conversation_id = 1;
+  repeated PushMessage messages = 2;
+  bool has_more = 3;
+  int64 next_sequence = 4;
+}
+
+message SyncComplete {
+  int64 conversation_id = 1;
+  int64 next_sequence = 2;
 }
