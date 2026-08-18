@@ -7,6 +7,9 @@ import com.example.im.netty.protocol.ImProtocol.ConnectRequest;
 import com.example.im.netty.protocol.ImProtocol.ErrorPayload;
 import com.example.im.netty.protocol.ImProtocol.MessageEnvelope;
 import com.example.im.netty.session.SessionManager;
+import com.example.im.route.ConnectionRouteService;
+import com.example.im.route.NoopRouteRegistry;
+import com.example.im.route.ServerProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.jupiter.api.Test;
@@ -20,7 +23,7 @@ class AuthHandlerTest {
         SessionManager sessionManager = new SessionManager();
         JwtService jwtService = jwtService();
         AuthHandler authHandler = new AuthHandler(
-                new NettyAuthService(jwtService, sessionManager),
+                new NettyAuthService(jwtService, sessionManager, routeService()),
                 sessionManager);
         EmbeddedChannel channel = new EmbeddedChannel(authHandler);
 
@@ -41,7 +44,7 @@ class AuthHandlerTest {
     void messageBeforeConnectShouldReturnErrorAndClose() throws Exception {
         SessionManager sessionManager = new SessionManager();
         AuthHandler authHandler = new AuthHandler(
-                new NettyAuthService(jwtService(), sessionManager),
+                new NettyAuthService(jwtService(), sessionManager, routeService()),
                 sessionManager);
         EmbeddedChannel channel = new EmbeddedChannel(authHandler);
 
@@ -76,5 +79,11 @@ class AuthHandlerTest {
         properties.setSecret("test-secret-test-secret-test-secret");
         properties.setTtlSeconds(3600);
         return new JwtService(properties, new ObjectMapper());
+    }
+
+    private ConnectionRouteService routeService() {
+        ServerProperties properties = new ServerProperties();
+        properties.setId("test-server");
+        return new ConnectionRouteService(new NoopRouteRegistry(), properties);
     }
 }

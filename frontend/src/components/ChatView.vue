@@ -110,6 +110,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { apiUrl } from '../api/config';
 import { ImSocket } from '../services/imSocket';
 import type {
   ChatMessage,
@@ -239,7 +240,7 @@ async function selectGroup(group: GroupSummary) {
 
 async function loadGroups() {
   try {
-    const response = await fetch('/api/groups', { headers: authHeaders() });
+    const response = await fetch(apiUrl('/api/groups'), { headers: authHeaders() });
     if (!response.ok) {
       return;
     }
@@ -261,7 +262,7 @@ async function loadGroups() {
 
 async function loadGroupMembers(groupId: number) {
   try {
-    const response = await fetch(`/api/groups/${groupId}/members`, { headers: authHeaders() });
+    const response = await fetch(apiUrl(`/api/groups/${groupId}/members`), { headers: authHeaders() });
     if (!response.ok) {
       groupMembers.value = [];
       return;
@@ -282,7 +283,7 @@ async function createGroup() {
       name: groupName.value.trim(),
       memberIds: [...groupMemberIds.value],
     };
-    const response = await fetch('/api/groups', {
+    const response = await fetch(apiUrl('/api/groups'), {
       method: 'POST',
       headers: {
         ...authHeaders(),
@@ -311,7 +312,7 @@ async function leaveSelectedGroup() {
     return;
   }
   try {
-    await fetch(`/api/groups/${selectedGroup.value.groupId}/leave`, {
+    await fetch(apiUrl(`/api/groups/${selectedGroup.value.groupId}/leave`), {
       method: 'POST',
       headers: authHeaders(),
     });
@@ -328,7 +329,7 @@ async function disbandSelectedGroup() {
     return;
   }
   try {
-    await fetch(`/api/groups/${selectedGroup.value.groupId}`, {
+    await fetch(apiUrl(`/api/groups/${selectedGroup.value.groupId}`), {
       method: 'DELETE',
       headers: authHeaders(),
     });

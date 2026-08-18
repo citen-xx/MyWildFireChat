@@ -18,6 +18,7 @@ public class SessionManager {
 
     private final ConcurrentMap<SessionKey, ClientConnection> connectionsBySession = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, SessionKey> sessionsByConnection = new ConcurrentHashMap<>();
+    private final ConcurrentMap<SessionKey, ImSession> sessionByKey = new ConcurrentHashMap<>();
 
     public synchronized ImSession bind(Long userId, String deviceId, Channel channel) {
         ImSession session = bind(userId, deviceId, new NettyClientConnection(channel));
@@ -36,9 +37,11 @@ public class SessionManager {
         SessionKey previousKeyForConnection = sessionsByConnection.put(connection.id(), newKey);
         if (previousKeyForConnection != null && !previousKeyForConnection.equals(newKey)) {
             connectionsBySession.remove(previousKeyForConnection, connection);
+            sessionByKey.remove(previousKeyForConnection);
         }
 
         ClientConnection previousConnection = connectionsBySession.put(newKey, connection);
+        sessionByKey.put(newKey, session);
 
         if (previousConnection != null && previousConnection != connection && previousConnection.isActive()) {
             sessionsByConnection.remove(previousConnection.id(), newKey);
@@ -47,23 +50,29 @@ public class SessionManager {
         return session;
     }
 
-    public synchronized void remove(Channel channel) {
+    public synchronized Optional<ImSession> remove(Channel channel) {
         SessionKey key = sessionsByConnection.remove(NettyClientConnection.idOf(channel));
         if (key != null) {
             ClientConnection current = connectionsBySession.get(key);
             if (current instanceof NettyClientConnection nettyConnection
                     && nettyConnection.channel().equals(channel)) {
                 connectionsBySession.remove(key, current);
+                ImSession removedSession = sessionByKey.remove(key);
+                channel.attr(SESSION_ATTRIBUTE).set(null);
+                return Optional.ofNullable(removedSession);
             }
         }
         channel.attr(SESSION_ATTRIBUTE).set(null);
+        return Optional.empty();
     }
 
-    public synchronized void remove(ClientConnection connection) {
+    public synchronized Optional<ImSession> remove(ClientConnection connection) {
         SessionKey key = sessionsByConnection.remove(connection.id());
         if (key != null) {
             connectionsBySession.remove(key, connection);
+            return Optional.ofNullable(sessionByKey.remove(key));
         }
+        return Optional.empty();
     }
 
     public Optional<Channel> findChannel(Long userId, String deviceId) {

@@ -13,6 +13,7 @@ import com.example.im.message.sync.SyncResult;
 import com.example.im.message.sync.SyncService;
 import com.example.im.netty.session.ImSession;
 import com.example.im.netty.session.SessionManager;
+import com.example.im.route.ConnectionRouteService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -38,6 +39,7 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
     private final MessageDeliveryService deliveryService;
     private final AckService ackService;
     private final SyncService syncService;
+    private final ConnectionRouteService routeService;
 
     public ImWebSocketHandler(
             ObjectMapper objectMapper,
@@ -46,7 +48,8 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
             MessageService messageService,
             MessageDeliveryService deliveryService,
             AckService ackService,
-            SyncService syncService) {
+            SyncService syncService,
+            ConnectionRouteService routeService) {
         this.objectMapper = objectMapper;
         this.jwtService = jwtService;
         this.sessionManager = sessionManager;
@@ -54,6 +57,7 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
         this.deliveryService = deliveryService;
         this.ackService = ackService;
         this.syncService = syncService;
+        this.routeService = routeService;
     }
 
     @Override
@@ -76,6 +80,7 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
         }
 
         if ("PING".equals(type)) {
+            routeService.refresh(imSession);
             connection.sendJson("PONG", requestId, Map.of());
             return;
         }
@@ -118,6 +123,7 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
             JwtClaims claims = jwtService.verify(token);
             WebSocketClientConnection connection = new WebSocketClientConnection(session, objectMapper);
             ImSession imSession = sessionManager.bind(claims.userId(), deviceId, connection);
+            routeService.register(imSession);
             session.getAttributes().put(CONNECTION_ATTR, connection);
             session.getAttributes().put(SESSION_ATTR, imSession);
             connection.sendJson("CONNECT_ACK", requestId, Map.of(
@@ -210,7 +216,7 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
         WebSocketClientConnection connection = connection(session);
         if (connection != null) {
-            sessionManager.remove(connection);
+            sessionManager.remove(connection).ifPresent(routeService::remove);
         }
         super.afterConnectionClosed(session, status);
     }
@@ -219,7 +225,7 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
     public void handleTransportError(WebSocketSession session, Throwable exception) throws Exception {
         WebSocketClientConnection connection = connection(session);
         if (connection != null) {
-            sessionManager.remove(connection);
+            sessionManager.remove(connection).ifPresent(routeService::remove);
         }
         session.close(CloseStatus.SERVER_ERROR);
     }

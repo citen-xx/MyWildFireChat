@@ -6,8 +6,8 @@
 WildfireChat 的长连接、会话、投递和同步设计思想，但不复制其源码、
 包名、MQTT 协议或工程结构。
 
-当前已完成 Phase 5：在 Phase 4 基础上实现断线重连后的
-Conversation Sequence 增量同步、分页、权限校验和客户端连续游标。
+当前已完成到 Phase 7：在单聊、ACK、离线增量同步和群聊基础上，实现
+Redis 在线连接路由、Server 注册/心跳和多节点连接定位。
 
 ## Architecture
 
@@ -28,8 +28,8 @@ REST Client
   -> Application Service
 ```
 
-Phase 5 完成单节点在线可靠投递和断线恢复。Redis route、RabbitMQ 跨节点
-转发会在后续阶段逐步完成。
+Phase 7 已能把 `userId + deviceId` 的在线位置写入 Redis，并区分本机、
+远端和离线连接。RabbitMQ 跨节点转发留到 Phase 8。
 
 ## 模块说明
 
@@ -60,13 +60,14 @@ com.example.im
 - `conversation`: 会话表，`biz_key` 唯一
 - `conversation_member`: 会话成员表，`(conversation_id, user_id)` 联合主键
 - `message`: 消息表
+- `chat_group`: 群资料表
+- `group_member`: 群成员表
 
 当前种子数据文件：`src/main/resources/db/data.sql`
 
 - `alice / password123`, userId: `1001`
 - `bob / password123`, userId: `1002`
-
-后续 Phase 6 会加入 `chat_group`, `group_member`。
+- `charlie / password123`, userId: `1003`
 
 `message` 关键约束：
 
@@ -76,10 +77,14 @@ com.example.im
 
 ## Redis Key
 
-当前和后续计划使用：
+当前使用：
 
 - `im:seq:{conversationId}`: Conversation sequence counter，Phase 3 使用 Redis `INCR`
-- `im:route:{userId}:{deviceId}`: online route with TTL
+- `im:route:{userId}:{deviceId}`: Redis HASH，字段为 `userId`, `deviceId`,
+  `serverId`, `connectionId`, `connectedAt`，带 TTL
+- `im:user:devices:{userId}`: Redis SET，记录某个用户当前出现过的在线 deviceId，
+  用于查找多端设备，带 TTL
+- `im:server:registry`: Redis ZSET，member 为 `serverId`，score 为最近心跳时间戳
 - `im:pending_ack:{userId}:{deviceId}`: Redis ZSET，member 为 `messageId`，
   score 为下一次重投时间戳
 - `im:pending_ack_attempt:{userId}:{deviceId}`: Redis Hash，field 为
@@ -89,7 +94,7 @@ com.example.im
 
 ## RabbitMQ Exchange / Queue
 
-Phase 1 只提供 Docker Compose RabbitMQ。Phase 8 中 RabbitMQ 只用于跨 IM
+当前 Docker Compose 已提供 RabbitMQ。Phase 8 中 RabbitMQ 只用于跨 IM
 节点消息转发，不用于普通异步落库或延迟队列。
 
 ## Message Protocol
@@ -152,8 +157,9 @@ Client A
   -> Redis INCR im:seq:{conversationId}
   -> MySQL insert message
   -> SEND_RESULT to Client A
-  -> SessionManager finds all receiver devices
+  -> ConnectionLocator finds receiver devices from local Session / Redis route
   -> PUSH_MESSAGE to each local Channel
+  -> remote target waits for Phase 8 RabbitMQ forwarding
 ```
 
 客户端不能在 `SendMessageRequest` 中提供 `senderId`。服务端只使用
@@ -415,11 +421,49 @@ WebSocket open
 
 ## 多节点路由
 
-TODO: Phase 7-8 实现。
+Phase 7 已实现 Redis 在线路由和 Server 注册心跳，但不做跨节点消息转发。
 
 单机 `SessionManager` 只保存本进程 live Channel；Redis route 保存
-`userId + deviceId -> serverId` 并设置 TTL。跨节点消息通过 RabbitMQ 转发到
-目标 `serverId` 所在实例。
+`userId + deviceId -> serverId + connectionId` 并设置 TTL。连接鉴权成功后，
+`ConnectionRouteService` 异步注册 route；收到 `PING` 时异步刷新 TTL；
+Channel 断开时按 `connectionId` 条件删除 route。
+
+Redis Route 数据结构：
+
+```text
+im:route:{userId}:{deviceId}
+  userId       -> 1002
+  deviceId     -> web
+  serverId     -> im-server-2
+  connectionId -> ws:...
+  connectedAt  -> epoch millis
+
+im:user:devices:{userId}
+  web
+  pc
+
+im:server:registry
+  ZSET member = serverId
+  ZSET score  = lastHeartbeatTimestamp
+```
+
+`ServerHeartbeatScheduler` 在应用启动后定期写入 `im:server:registry`，并清理
+超过 `im.server.offline-timeout-seconds` 的 serverId。优雅停机时会 best-effort
+移除当前 server；进程崩溃时依靠 route TTL 和 server 心跳过期清理脏数据。
+
+重复登录采用 Last Writer Wins：同一 `userId + deviceId` 新连接覆盖旧 route。
+旧 Channel 后续断开时，Lua 脚本会比较 `connectionId`，只有 owner 匹配才删除，
+避免旧连接误删新连接。`PING` 刷新同样按 owner 校验；如果 Redis key 因 TTL
+消失，当前连接的下一次心跳会重新注册 route。
+
+`ConnectionLocator` 查询某个接收方设备时会返回：
+
+- `LOCAL`: route 指向当前 server 且本地 Session 存在，可以立即 Push
+- `REMOTE`: route 指向其他 server，当前 Phase 只记录日志，Phase 8 通过 RabbitMQ 转发
+- `OFFLINE`: Redis route 不存在，或者 route 指向当前 server 但本地 Session 不存在
+
+Redis route 只是在线定位，不是消息可靠性的最终来源。消息是否丢失仍以 MySQL
+持久化、ACK 和 Phase 5 Sequence Sync 共同保证。
 
 ## Web Client
 
@@ -493,7 +537,7 @@ Browser JSON
   -> MessageService
   -> ConversationService / MySQL / Redis sequence
   -> MessageDeliveryService
-  -> SessionManager
+  -> ConnectionLocator
   -> WebSocketClientConnection or NettyClientConnection
 ```
 
@@ -544,6 +588,31 @@ http://localhost:5173
 - Redis: `6380`
 - RabbitMQ: `5672`
 - RabbitMQ Management: `15672`
+
+本地启动两个 IM Server 示例：
+
+```text
+# terminal 1
+$env:IM_SERVER_ID="im-server-1"
+$env:IM_HTTP_PORT="8080"
+$env:IM_NETTY_PORT="9000"
+mvn spring-boot:run
+
+# terminal 2
+$env:IM_SERVER_ID="im-server-2"
+$env:IM_HTTP_PORT="8081"
+$env:IM_NETTY_PORT="9002"
+mvn spring-boot:run
+```
+
+前端默认连接 `http://localhost:8080`。需要连接第二个后端时，可以设置：
+
+```text
+cd frontend
+$env:VITE_API_BASE_URL="http://localhost:8081"
+$env:VITE_WS_URL="ws://localhost:8081/ws/im"
+npm run dev
+```
 
 登录测试：
 
@@ -607,15 +676,21 @@ Phase 3 测试覆盖：
 - SYNC 分页、`hasMore`、`nextSequence` 和超过最大 limit 的限制
 - 非成员、非法 sequence、非法 limit 不能读取 Conversation 历史
 - WebSocket `SYNC_REQUEST` 复用同一套 `SyncService`
+- Redis route 注册、刷新、TTL 过期和 owner 条件删除
+- Server heartbeat 注册和过期 server 清理
+- CONNECT / PING / disconnect 会创建、恢复和删除 Redis route
+- 同一 `userId + deviceId` 新连接不会被旧连接断开事件误删 route
+- `ConnectionLocator` 可以区分本机、远端和离线连接
 
 ## 当前限制
 
 - 登录密码当前使用 `{noop}` 种子数据，`{pbkdf2}` 校验能力已预留，后续需要提供注册或管理脚本生成安全密码
-- 当前只实现单进程内存 Session，Redis route 还未实现
+- 本机 Channel 仍由单进程 `SessionManager` 保存；Redis route 只保存跨节点在线位置
 - Phase 3 集成测试使用 H2 MySQL mode；生产运行配置仍使用 MySQL
-- Web 前端使用固定 Demo User List: Alice/Bob，不是好友系统
-- 已实现在线接收方 ACK、有限重投和单节点离线增量同步
-- 未实现群聊、服务端设备游标、多端跨设备同步进度、Redis route、RabbitMQ 跨节点转发
+- Web 前端使用固定 Demo User List，不是好友系统
+- 已实现在线接收方 ACK、有限重投、离线增量同步、群聊和 Redis route
+- Phase 7 只发现远端连接，不向远端节点转发消息；RabbitMQ 跨节点转发留到 Phase 8
+- 未实现服务端设备游标、多端跨设备同步进度
 - 当前 CLI 客户端尚未提供
 - Redis Pending ACK 的多 Worker Claim Lock 暂未实现，当前按单节点扫描器设计
 - 前端自动同步的 Conversation 列表来自本地 localStorage，第一次打开未知 Conversation
@@ -623,8 +698,6 @@ Phase 3 测试覆盖：
 
 ## TODO
 
-- Phase 6: 群聊
-- Phase 7: Redis route 和多节点启动
 - Phase 8: RabbitMQ 跨节点转发
 - Phase 9: 多端登录和独立同步位置
 

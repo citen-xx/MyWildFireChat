@@ -9,6 +9,7 @@ import type {
   SyncResponsePayload,
   WsEnvelope,
 } from '../types/im';
+import { websocketUrl } from '../api/config';
 
 interface ImSocketOptions {
   token: string;
@@ -42,8 +43,7 @@ export class ImSocket {
     this.clearReconnectTimer();
     this.options.onStatusChange(this.retryCount === 0 ? 'Connecting' : 'Reconnecting');
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/ws/im`;
+    const url = websocketUrl('/ws/im');
     this.socket = new WebSocket(url);
 
     this.socket.onopen = () => {

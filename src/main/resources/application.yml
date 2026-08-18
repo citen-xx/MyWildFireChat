@@ -27,6 +27,13 @@ mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
 
 im:
+  server:
+    id: ${IM_SERVER_ID:im-server-1}
+    heartbeat-interval-seconds: ${IM_SERVER_HEARTBEAT_INTERVAL_SECONDS:10}
+    offline-timeout-seconds: ${IM_SERVER_OFFLINE_TIMEOUT_SECONDS:30}
+    route-ttl-seconds: ${IM_ROUTE_TTL_SECONDS:60}
+  route:
+    redis-enabled: true
   jwt:
     issuer: my-wildfire-chat
     secret: ${IM_JWT_SECRET:change-this-development-secret-change-this-development-secret}

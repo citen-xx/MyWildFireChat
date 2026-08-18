@@ -6,6 +6,7 @@ import com.example.im.common.exception.AuthException;
 import com.example.im.netty.protocol.ImProtocol.ConnectRequest;
 import com.example.im.netty.session.ImSession;
 import com.example.im.netty.session.SessionManager;
+import com.example.im.route.ConnectionRouteService;
 import io.netty.channel.Channel;
 import org.springframework.stereotype.Service;
 
@@ -14,10 +15,12 @@ public class NettyAuthService {
 
     private final JwtService jwtService;
     private final SessionManager sessionManager;
+    private final ConnectionRouteService routeService;
 
-    public NettyAuthService(JwtService jwtService, SessionManager sessionManager) {
+    public NettyAuthService(JwtService jwtService, SessionManager sessionManager, ConnectionRouteService routeService) {
         this.jwtService = jwtService;
         this.sessionManager = sessionManager;
+        this.routeService = routeService;
     }
 
     public ImSession authenticate(Channel channel, ConnectRequest request) {
@@ -25,6 +28,8 @@ public class NettyAuthService {
             throw new AuthException("INVALID_CONNECT", "deviceId is required");
         }
         JwtClaims claims = jwtService.verify(request.getToken());
-        return sessionManager.bind(claims.userId(), request.getDeviceId(), channel);
+        ImSession session = sessionManager.bind(claims.userId(), request.getDeviceId(), channel);
+        routeService.register(session);
+        return session;
     }
 }

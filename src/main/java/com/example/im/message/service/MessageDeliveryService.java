@@ -1,9 +1,10 @@
 package com.example.im.message.service;
 
 import com.example.im.message.ack.AckService;
-import com.example.im.netty.session.ActiveClientSession;
 import com.example.im.netty.session.ClientConnection;
-import com.example.im.netty.session.SessionManager;
+import com.example.im.route.ConnectionLocation;
+import com.example.im.route.ConnectionLocationType;
+import com.example.im.route.ConnectionLocator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -17,11 +18,11 @@ public class MessageDeliveryService {
 
     private static final Logger log = LoggerFactory.getLogger(MessageDeliveryService.class);
 
-    private final SessionManager sessionManager;
+    private final ConnectionLocator connectionLocator;
     private final AckService ackService;
 
-    public MessageDeliveryService(SessionManager sessionManager, AckService ackService) {
-        this.sessionManager = sessionManager;
+    public MessageDeliveryService(ConnectionLocator connectionLocator, AckService ackService) {
+        this.connectionLocator = connectionLocator;
         this.ackService = ackService;
     }
 
@@ -38,15 +39,23 @@ public class MessageDeliveryService {
             if (userId == null || userId <= 0) {
                 continue;
             }
-            for (ActiveClientSession session : sessionManager.findUserSessionConnections(userId)) {
+            for (ConnectionLocation location : connectionLocator.locateUserDevices(userId)) {
+                if (location.type() == ConnectionLocationType.REMOTE) {
+                    log.info("message remote target discovered messageId={} userId={} deviceId={} serverId={}",
+                            message.messageId(), userId, location.route().deviceId(), location.route().serverId());
+                    continue;
+                }
+                if (location.type() == ConnectionLocationType.OFFLINE) {
+                    continue;
+                }
                 try {
-                    ClientConnection connection = session.connection();
+                    ClientConnection connection = location.connection();
                     connection.sendPush(message);
-                    ackService.recordPush(message, session.key().userId(), session.key().deviceId());
+                    ackService.recordPush(message, userId, location.route().deviceId());
                     pushed++;
                 } catch (Exception exception) {
                     log.warn("message push failed messageId={} userId={} deviceId={}",
-                            message.messageId(), session.key().userId(), session.key().deviceId(), exception);
+                            message.messageId(), userId, location.route().deviceId(), exception);
                 }
             }
         }
