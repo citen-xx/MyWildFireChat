@@ -2,6 +2,7 @@ package com.example.im.message.service;
 
 import com.example.im.message.ack.AckService;
 import com.example.im.netty.session.ClientConnection;
+import com.example.im.mq.RemoteMessageRelayPublisher;
 import com.example.im.route.ConnectionLocation;
 import com.example.im.route.ConnectionLocationType;
 import com.example.im.route.ConnectionLocator;
@@ -20,10 +21,15 @@ public class MessageDeliveryService {
 
     private final ConnectionLocator connectionLocator;
     private final AckService ackService;
+    private final RemoteMessageRelayPublisher relayPublisher;
 
-    public MessageDeliveryService(ConnectionLocator connectionLocator, AckService ackService) {
+    public MessageDeliveryService(
+            ConnectionLocator connectionLocator,
+            AckService ackService,
+            RemoteMessageRelayPublisher relayPublisher) {
         this.connectionLocator = connectionLocator;
         this.ackService = ackService;
+        this.relayPublisher = relayPublisher;
     }
 
     public int pushToLocalReceiverDevices(SendMessageResult message) {
@@ -41,8 +47,11 @@ public class MessageDeliveryService {
             }
             for (ConnectionLocation location : connectionLocator.locateUserDevices(userId)) {
                 if (location.type() == ConnectionLocationType.REMOTE) {
-                    log.info("message remote target discovered messageId={} userId={} deviceId={} serverId={}",
-                            message.messageId(), userId, location.route().deviceId(), location.route().serverId());
+                    boolean published = relayPublisher.publish(message, location.route());
+                    if (!published) {
+                        log.warn("message remote relay skipped messageId={} userId={} deviceId={} serverId={}",
+                                message.messageId(), userId, location.route().deviceId(), location.route().serverId());
+                    }
                     continue;
                 }
                 if (location.type() == ConnectionLocationType.OFFLINE) {

@@ -146,6 +146,7 @@ class RedisRouteRegistryIntegrationTest {
                 "im:user:devices:970004"));
         redisTemplate.opsForZSet().remove(
                 RedisServerRegistry.REGISTRY_KEY,
+                "phase7-connect-server-1",
                 "phase7-server-1",
                 "phase7-server-2",
                 "phase7-expired-server");

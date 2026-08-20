@@ -97,6 +97,26 @@ com.example.im
 当前 Docker Compose 已提供 RabbitMQ。Phase 8 中 RabbitMQ 只用于跨 IM
 节点消息转发，不用于普通异步落库或延迟队列。
 
+当前约定：
+
+- Exchange: `im.message.relay`
+- Queue: `im.message.relay.{serverId}`
+- Routing Key: `serverId`
+- Relay 去重键: `sourceServerId|messageId|targetUserId|targetDeviceId|targetConnectionId`
+- 去重 TTL: 默认 30 秒
+
+Phase 8 的跨节点流程是：
+
+```text
+源节点
+  -> ConnectionLocator 发现 REMOTE
+  -> RabbitMQ publish relay event
+  -> 目标节点 queue consume
+  -> 目标节点校验 targetServerId / targetConnectionId
+  -> 本机 Session push
+  -> AckService.recordPush
+```
+
 ## Message Protocol
 
 当前 Protobuf 文件：`src/main/proto/im_protocol.proto`
@@ -159,7 +179,7 @@ Client A
   -> SEND_RESULT to Client A
   -> ConnectionLocator finds receiver devices from local Session / Redis route
   -> PUSH_MESSAGE to each local Channel
-  -> remote target waits for Phase 8 RabbitMQ forwarding
+  -> remote target is forwarded through RabbitMQ in Phase 8
 ```
 
 客户端不能在 `SendMessageRequest` 中提供 `senderId`。服务端只使用
@@ -421,7 +441,8 @@ WebSocket open
 
 ## 多节点路由
 
-Phase 7 已实现 Redis 在线路由和 Server 注册心跳，但不做跨节点消息转发。
+Phase 7 已实现 Redis 在线路由和 Server 注册心跳；Phase 8 已实现 RabbitMQ
+跨节点消息投递，但不做 ACK 回传到源节点，也不做全局消息总线去重。
 
 单机 `SessionManager` 只保存本进程 live Channel；Redis route 保存
 `userId + deviceId -> serverId + connectionId` 并设置 TTL。连接鉴权成功后，
@@ -459,7 +480,7 @@ im:server:registry
 `ConnectionLocator` 查询某个接收方设备时会返回：
 
 - `LOCAL`: route 指向当前 server 且本地 Session 存在，可以立即 Push
-- `REMOTE`: route 指向其他 server，当前 Phase 只记录日志，Phase 8 通过 RabbitMQ 转发
+- `REMOTE`: route 指向其他 server，Phase 8 通过 RabbitMQ 转发到目标 server
 - `OFFLINE`: Redis route 不存在，或者 route 指向当前 server 但本地 Session 不存在
 
 Redis route 只是在线定位，不是消息可靠性的最终来源。消息是否丢失仍以 MySQL
@@ -688,8 +709,8 @@ Phase 3 测试覆盖：
 - 本机 Channel 仍由单进程 `SessionManager` 保存；Redis route 只保存跨节点在线位置
 - Phase 3 集成测试使用 H2 MySQL mode；生产运行配置仍使用 MySQL
 - Web 前端使用固定 Demo User List，不是好友系统
-- 已实现在线接收方 ACK、有限重投、离线增量同步、群聊和 Redis route
-- Phase 7 只发现远端连接，不向远端节点转发消息；RabbitMQ 跨节点转发留到 Phase 8
+- 已实现在线接收方 ACK、有限重投、离线增量同步、群聊、Redis route 和 RabbitMQ 跨节点转发
+- Phase 8 不做跨节点 ACK 返程、消息永久重放队列或全局 exactly-once
 - 未实现服务端设备游标、多端跨设备同步进度
 - 当前 CLI 客户端尚未提供
 - Redis Pending ACK 的多 Worker Claim Lock 暂未实现，当前按单节点扫描器设计
@@ -698,7 +719,6 @@ Phase 3 测试覆盖：
 
 ## TODO
 
-- Phase 8: RabbitMQ 跨节点转发
 - Phase 9: 多端登录和独立同步位置
 
 ## 参考说明

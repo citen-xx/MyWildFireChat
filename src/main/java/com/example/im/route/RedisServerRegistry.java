@@ -17,33 +17,49 @@ public class RedisServerRegistry implements ServerRegistry {
 
     @Override
     public void heartbeat(String serverId, long timestampMillis) {
-        redisTemplate.opsForZSet().add(REGISTRY_KEY, serverId, timestampMillis);
+        try {
+            redisTemplate.opsForZSet().add(REGISTRY_KEY, serverId, timestampMillis);
+        } catch (IllegalStateException exception) {
+            return;
+        }
     }
 
     @Override
     public void remove(String serverId) {
-        redisTemplate.opsForZSet().remove(REGISTRY_KEY, serverId);
+        try {
+            redisTemplate.opsForZSet().remove(REGISTRY_KEY, serverId);
+        } catch (IllegalStateException exception) {
+            return;
+        }
     }
 
     @Override
     public List<String> findActiveServers(long nowMillis, long offlineTimeoutMillis) {
-        Set<String> servers = redisTemplate.opsForZSet().rangeByScore(
-                REGISTRY_KEY,
-                Math.max(nowMillis - offlineTimeoutMillis, 0L),
-                Double.POSITIVE_INFINITY);
-        return servers == null ? List.of() : List.copyOf(servers);
+        try {
+            Set<String> servers = redisTemplate.opsForZSet().rangeByScore(
+                    REGISTRY_KEY,
+                    Math.max(nowMillis - offlineTimeoutMillis, 0L),
+                    Double.POSITIVE_INFINITY);
+            return servers == null ? List.of() : List.copyOf(servers);
+        } catch (IllegalStateException exception) {
+            return List.of();
+        }
     }
 
     @Override
     public List<String> removeExpiredServers(long nowMillis, long offlineTimeoutMillis) {
-        Set<String> expiredServers = redisTemplate.opsForZSet().rangeByScore(
-                REGISTRY_KEY,
-                0,
-                Math.max(nowMillis - offlineTimeoutMillis, 0L));
-        if (expiredServers == null || expiredServers.isEmpty()) {
+        try {
+            Set<String> expiredServers = redisTemplate.opsForZSet().rangeByScore(
+                    REGISTRY_KEY,
+                    0,
+                    Math.max(nowMillis - offlineTimeoutMillis, 0L));
+            if (expiredServers == null || expiredServers.isEmpty()) {
+                return List.of();
+            }
+            redisTemplate.opsForZSet().remove(REGISTRY_KEY, expiredServers.toArray());
+            return List.copyOf(expiredServers);
+        } catch (IllegalStateException exception) {
             return List.of();
         }
-        redisTemplate.opsForZSet().remove(REGISTRY_KEY, expiredServers.toArray());
-        return List.copyOf(expiredServers);
     }
 }

@@ -17,6 +17,11 @@ spring:
       host: ${IM_REDIS_HOST:localhost}
       port: ${IM_REDIS_PORT:6380}
       password: ${IM_REDIS_PASSWORD:}
+  rabbitmq:
+    host: ${IM_RABBITMQ_HOST:localhost}
+    port: ${IM_RABBITMQ_PORT:5672}
+    username: ${IM_RABBITMQ_USERNAME:im}
+    password: ${IM_RABBITMQ_PASSWORD:im}
 
 server:
   port: ${IM_HTTP_PORT:8080}
@@ -34,6 +39,11 @@ im:
     route-ttl-seconds: ${IM_ROUTE_TTL_SECONDS:60}
   route:
     redis-enabled: true
+  mq:
+    enabled: ${IM_MQ_ENABLED:true}
+    exchange: ${IM_MQ_EXCHANGE:im.message.relay}
+    queue-prefix: ${IM_MQ_QUEUE_PREFIX:im.message.relay.}
+    delivery-dedup-ttl-seconds: ${IM_MQ_DELIVERY_DEDUP_TTL_SECONDS:30}
   jwt:
     issuer: my-wildfire-chat
     secret: ${IM_JWT_SECRET:change-this-development-secret-change-this-development-secret}
