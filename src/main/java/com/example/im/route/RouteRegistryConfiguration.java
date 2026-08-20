@@ -14,7 +14,7 @@ public class RouteRegistryConfiguration {
             ObjectProvider<StringRedisTemplate> redisTemplateProvider,
             ServerProperties serverProperties,
             @Value("${im.route.redis-enabled:true}") boolean redisEnabled) {
-            StringRedisTemplate redisTemplate = redisTemplateProvider.getIfAvailable();
+        StringRedisTemplate redisTemplate = redisTemplateProvider.getIfAvailable();
         if (redisEnabled && redisTemplate != null) {
             return new RedisRouteRegistry(redisTemplate, serverProperties);
         }
