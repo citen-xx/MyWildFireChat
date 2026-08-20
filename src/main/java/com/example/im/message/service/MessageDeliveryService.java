@@ -1,6 +1,7 @@
 package com.example.im.message.service;
 
 import com.example.im.message.ack.AckService;
+import com.example.im.mq.RemoteMessageRelayEvent;
 import com.example.im.netty.session.ClientConnection;
 import com.example.im.mq.RemoteMessageRelayPublisher;
 import com.example.im.route.ConnectionLocation;
@@ -59,8 +60,16 @@ public class MessageDeliveryService {
                 }
                 try {
                     ClientConnection connection = location.connection();
+                    String deliveryId = RemoteMessageRelayEvent.stableDeliveryId(
+                            message, userId, location.route().deviceId());
+                    ackService.recordPush(
+                            message,
+                            userId,
+                            location.route().deviceId(),
+                            location.route().connectionId(),
+                            location.route().serverId(),
+                            deliveryId);
                     connection.sendPush(message);
-                    ackService.recordPush(message, userId, location.route().deviceId());
                     pushed++;
                 } catch (Exception exception) {
                     log.warn("message push failed messageId={} userId={} deviceId={}",

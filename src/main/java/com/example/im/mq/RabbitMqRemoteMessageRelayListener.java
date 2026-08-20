@@ -1,9 +1,13 @@
 package com.example.im.mq;
 
 import com.example.im.message.ack.AckService;
+import com.example.im.message.ack.AckProperties;
 import com.example.im.message.service.SendMessageResult;
 import com.example.im.netty.session.ClientConnection;
 import com.example.im.netty.session.SessionManager;
+import com.example.im.route.ConnectionLocation;
+import com.example.im.route.ConnectionLocationType;
+import com.example.im.route.ConnectionLocator;
 import com.example.im.route.ServerProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,16 +27,25 @@ public class RabbitMqRemoteMessageRelayListener {
     private final AckService ackService;
     private final RelayDeliveryDeduplicator deduplicator;
     private final ServerProperties serverProperties;
+    private final ConnectionLocator connectionLocator;
+    private final RemoteMessageRelayPublisher relayPublisher;
+    private final AckProperties ackProperties;
 
     public RabbitMqRemoteMessageRelayListener(
             SessionManager sessionManager,
             AckService ackService,
             RelayDeliveryDeduplicator deduplicator,
-            ServerProperties serverProperties) {
+            ServerProperties serverProperties,
+            ConnectionLocator connectionLocator,
+            RemoteMessageRelayPublisher relayPublisher,
+            AckProperties ackProperties) {
         this.sessionManager = sessionManager;
         this.ackService = ackService;
         this.deduplicator = deduplicator;
         this.serverProperties = serverProperties;
+        this.connectionLocator = connectionLocator;
+        this.relayPublisher = relayPublisher;
+        this.ackProperties = ackProperties;
     }
 
     @RabbitListener(queues = "#{@messageRelayQueue.name}")
@@ -41,50 +54,83 @@ public class RabbitMqRemoteMessageRelayListener {
             log.warn("mq relay ignored because deliveryId is missing");
             return;
         }
+        String eventId = event.getEventId();
+        if (eventId == null || eventId.isBlank()) {
+            eventId = RemoteMessageRelayEvent.stableEventId(
+                    event.getSourceServerId(),
+                    event.getDeliveryId(),
+                    event.getTargetServerId(),
+                    event.getAttempt(),
+                    event.getHopCount());
+            event.setEventId(eventId);
+        }
         if (!serverProperties.getId().equals(event.getTargetServerId())) {
             log.warn("mq relay ignored because target server does not match deliveryId={} targetServerId={} currentServerId={}",
                     event.getDeliveryId(), event.getTargetServerId(), serverProperties.getId());
             return;
         }
-        if (!deduplicator.tryStart(event.getDeliveryId())) {
-            log.info("mq relay duplicate ignored deliveryId={} messageId={} userId={} deviceId={}",
-                    event.getDeliveryId(), event.getMessageId(), event.getTargetUserId(), event.getTargetDeviceId());
+        if (!deduplicator.tryStart(eventId)) {
+            log.info("mq relay duplicate ignored deliveryId={} eventId={} messageId={} userId={} deviceId={}",
+                    event.getDeliveryId(), eventId, event.getMessageId(), event.getTargetUserId(), event.getTargetDeviceId());
             return;
         }
 
-        Optional<ClientConnection> connection = sessionManager.findConnection(
+        ConnectionLocation location = connectionLocator.locate(
                 event.getTargetUserId(),
                 event.getTargetDeviceId());
-        if (connection.isEmpty()) {
-            log.info("mq relay target offline deliveryId={} messageId={} userId={} deviceId={}",
+        if (location.type() == ConnectionLocationType.OFFLINE) {
+            log.info("mq relay target offline deliveryId={} eventId={} messageId={} userId={} deviceId={}",
                     event.getDeliveryId(), event.getMessageId(), event.getTargetUserId(), event.getTargetDeviceId());
             return;
         }
 
-        ClientConnection targetConnection = connection.get();
-        if (event.getTargetConnectionId() != null
-                && !event.getTargetConnectionId().isBlank()
-                && !event.getTargetConnectionId().equals(targetConnection.id())) {
-            log.info("mq relay stale connection skipped deliveryId={} messageId={} userId={} deviceId={} expectedConnectionId={} actualConnectionId={}",
+        if (location.type() == ConnectionLocationType.REMOTE) {
+            int nextHopCount = event.getHopCount() + 1;
+            if (nextHopCount > Math.max(ackProperties.getMaxRelayHops(), 0)) {
+                log.warn("mq relay hop exhausted deliveryId={} eventId={} messageId={} userId={} deviceId={} hopCount={}",
+                        event.getDeliveryId(), eventId, event.getMessageId(), event.getTargetUserId(),
+                        event.getTargetDeviceId(), nextHopCount);
+                return;
+            }
+            boolean forwarded = relayPublisher.publish(
+                    event.toMessageResult(),
+                    location.route(),
                     event.getDeliveryId(),
-                    event.getMessageId(),
-                    event.getTargetUserId(),
-                    event.getTargetDeviceId(),
-                    event.getTargetConnectionId(),
-                    targetConnection.id());
+                    event.getAttempt(),
+                    nextHopCount);
+            if (!forwarded) {
+                deduplicator.release(eventId);
+                throw new IllegalStateException("failed to forward relay event");
+            }
+            log.info("delivery migrated messageId={} deliveryId={} eventId={} userId={} deviceId={} ownerServerId={} targetServerId={} attempt={} hopCount={}",
+                    event.getMessageId(), event.getDeliveryId(), eventId, event.getTargetUserId(),
+                    event.getTargetDeviceId(), serverProperties.getId(), location.route().serverId(),
+                    event.getAttempt(), nextHopCount);
             return;
         }
 
+        ClientConnection targetConnection = location.connection();
         SendMessageResult message = event.toMessageResult();
         try {
+            ackService.recordPush(
+                    message,
+                    event.getTargetUserId(),
+                    event.getTargetDeviceId(),
+                    location.route().connectionId(),
+                    serverProperties.getId(),
+                    event.getDeliveryId(),
+                    event.getAttempt(),
+                    event.getHopCount());
             targetConnection.sendPush(message);
-            ackService.recordPush(message, event.getTargetUserId(), event.getTargetDeviceId());
-            log.info("mq relay delivered deliveryId={} messageId={} userId={} deviceId={} attempt={}",
-                    event.getDeliveryId(), event.getMessageId(), event.getTargetUserId(), event.getTargetDeviceId(), 0);
+            log.info("mq relay delivered deliveryId={} eventId={} messageId={} userId={} deviceId={} attempt={} hopCount={}",
+                    event.getDeliveryId(), eventId, event.getMessageId(), event.getTargetUserId(),
+                    event.getTargetDeviceId(), event.getAttempt(), event.getHopCount());
         } catch (Exception exception) {
-            log.warn("mq relay delivery failed deliveryId={} messageId={} userId={} deviceId={}",
+            deduplicator.release(eventId);
+            log.warn("mq relay delivery failed deliveryId={} eventId={} messageId={} userId={} deviceId={}",
                     event.getDeliveryId(), event.getMessageId(), event.getTargetUserId(), event.getTargetDeviceId(),
                     exception);
+            throw exception;
         }
     }
 }

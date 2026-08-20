@@ -25,14 +25,21 @@ public class RedisRelayDeliveryDeduplicator implements RelayDeliveryDeduplicator
     }
 
     @Override
-    public boolean tryStart(String deliveryId) {
-        if (deliveryId == null || deliveryId.isBlank()) {
+    public boolean tryStart(String eventId) {
+        if (eventId == null || eventId.isBlank()) {
             return false;
         }
         Boolean created = redisTemplate.opsForValue().setIfAbsent(
-                KEY_PREFIX + deliveryId,
+                KEY_PREFIX + eventId,
                 "1",
                 Duration.ofSeconds(Math.max(properties.getDeliveryDedupTtlSeconds(), 1L)));
         return Boolean.TRUE.equals(created);
+    }
+
+    @Override
+    public void release(String eventId) {
+        if (eventId != null && !eventId.isBlank()) {
+            redisTemplate.delete(KEY_PREFIX + eventId);
+        }
     }
 }

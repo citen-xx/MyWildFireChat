@@ -32,28 +32,46 @@ public class RabbitMqRemoteMessageRelayPublisher implements RemoteMessageRelayPu
     @Override
     public boolean publish(SendMessageResult message, ConnectionRoute targetRoute) {
         String deliveryId = RemoteMessageRelayEvent.stableDeliveryId(
-                serverProperties.getId(),
                 message,
                 targetRoute.userId(),
-                targetRoute.deviceId(),
-                targetRoute.connectionId());
+                targetRoute.deviceId());
+        return publish(message, targetRoute, deliveryId, 0, 0);
+    }
+
+    @Override
+    public boolean publish(
+            SendMessageResult message,
+            ConnectionRoute targetRoute,
+            String deliveryId,
+            int attempt,
+            int hopCount) {
+        String eventId = RemoteMessageRelayEvent.stableEventId(
+                serverProperties.getId(),
+                deliveryId,
+                targetRoute.serverId(),
+                attempt,
+                hopCount);
         RemoteMessageRelayEvent event = RemoteMessageRelayEvent.of(
                 deliveryId,
+                eventId,
                 message,
                 targetRoute.userId(),
                 targetRoute.deviceId(),
                 targetRoute.connectionId(),
                 targetRoute.serverId(),
-                serverProperties.getId());
+                serverProperties.getId(),
+                attempt,
+                hopCount);
         try {
             rabbitTemplate.convertAndSend(mqProperties.getExchange(), targetRoute.serverId(), event);
-            log.info("mq relay published deliveryId={} messageId={} userId={} deviceId={} targetServerId={}",
-                    deliveryId, message.messageId(), targetRoute.userId(), targetRoute.deviceId(), targetRoute.serverId());
+            log.info("mq relay published deliveryId={} eventId={} messageId={} userId={} deviceId={} targetServerId={} attempt={} hopCount={}",
+                    deliveryId, eventId, message.messageId(), targetRoute.userId(), targetRoute.deviceId(),
+                    targetRoute.serverId(), attempt, hopCount);
             return true;
         } catch (AmqpException exception) {
-            log.warn("mq relay publish failed deliveryId={} messageId={} userId={} deviceId={} targetServerId={}",
+            log.warn("mq relay publish failed deliveryId={} eventId={} messageId={} userId={} deviceId={} targetServerId={} attempt={} hopCount={}",
                     deliveryId, message.messageId(), targetRoute.userId(), targetRoute.deviceId(),
-                    targetRoute.serverId(), exception);
+                    targetRoute.serverId(), attempt, hopCount, exception);
             return false;
         }
     }

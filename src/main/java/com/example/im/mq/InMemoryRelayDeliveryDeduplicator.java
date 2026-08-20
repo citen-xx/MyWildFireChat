@@ -13,12 +13,19 @@ import java.util.concurrent.ConcurrentHashMap;
 @ConditionalOnMissingBean(StringRedisTemplate.class)
 public class InMemoryRelayDeliveryDeduplicator implements RelayDeliveryDeduplicator {
 
-    private final Set<String> processedDeliveryIds = ConcurrentHashMap.newKeySet();
+    private final Set<String> processedEventIds = ConcurrentHashMap.newKeySet();
 
     @Override
-    public boolean tryStart(String deliveryId) {
-        return deliveryId != null
-                && !deliveryId.isBlank()
-                && processedDeliveryIds.add(deliveryId);
+    public boolean tryStart(String eventId) {
+        return eventId != null
+                && !eventId.isBlank()
+                && processedEventIds.add(eventId);
+    }
+
+    @Override
+    public void release(String eventId) {
+        if (eventId != null) {
+            processedEventIds.remove(eventId);
+        }
     }
 }

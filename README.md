@@ -6,8 +6,9 @@
 WildfireChat 的长连接、会话、投递和同步设计思想，但不复制其源码、
 包名、MQTT 协议或工程结构。
 
-当前已完成到 Phase 7：在单聊、ACK、离线增量同步和群聊基础上，实现
-Redis 在线连接路由、Server 注册/心跳和多节点连接定位。
+当前已完成到 Phase 10：在单聊、ACK、离线增量同步、群聊、Redis 在线路由、
+RabbitMQ 跨节点投递和多端同步基础上，补充了独立压测客户端、性能基线和
+故障注入验证。
 
 ## Architecture
 
@@ -102,8 +103,10 @@ com.example.im
 - Exchange: `im.message.relay`
 - Queue: `im.message.relay.{serverId}`
 - Routing Key: `serverId`
-- Relay 去重键: `sourceServerId|messageId|targetUserId|targetDeviceId|targetConnectionId`
-- 去重 TTL: 默认 30 秒
+- `deliveryId`: `messageId|targetUserId|targetDeviceId`，表示一条消息到一个设备的逻辑投递
+- `eventId`: `sourceServerId|deliveryId|targetServerId|attempt|hopCount`，表示一次 RabbitMQ transport event
+- MQ 去重键: `eventId`
+- Relay 去重 TTL: 默认 30 秒
 
 Phase 8 的跨节点流程是：
 
@@ -115,7 +118,14 @@ Phase 8 的跨节点流程是：
   -> 目标节点校验 targetServerId / targetConnectionId
   -> 本机 Session push
   -> AckService.recordPush
+  -> 目标节点创建本机 owner 的 Pending ACK
 ```
+
+Phase 9 以后，RabbitMQ 的 consumer duplicate 和合法 retry 分开处理：
+
+- 同一个 `eventId` 重复消费，只处理一次
+- 同一个 `deliveryId` 使用新的 `eventId` 和更高 `attempt`，允许再次 Push
+- `hopCount` 默认最多 2，防止 Route 抖动造成跨节点转发循环
 
 ## Message Protocol
 
@@ -160,8 +170,9 @@ Phase 5 已实现 payload：
 - `SyncComplete(conversationId, nextSequence)`
 
 `SendResult` 只表示服务端已经成功接收并持久化，不表示接收方已经收到。
+RabbitMQ consumer ACK 只表示目标 IM Server 已经消费 relay event。
 `MessageAck` 表示接收方某个 `userId + deviceId` 连接已经收到并处理了
-`PUSH_MESSAGE`。
+`PUSH_MESSAGE`。这三种确认互不替代。
 
 TCP framing 使用 4 字节 length field，避免 TCP 粘包拆包问题。
 
@@ -179,7 +190,8 @@ Client A
   -> SEND_RESULT to Client A
   -> ConnectionLocator finds receiver devices from local Session / Redis route
   -> PUSH_MESSAGE to each local Channel
-  -> remote target is forwarded through RabbitMQ in Phase 8
+  -> remote target is forwarded through RabbitMQ
+  -> target Server owns the device Pending ACK and Retry
 ```
 
 客户端不能在 `SendMessageRequest` 中提供 `senderId`。服务端只使用
@@ -442,7 +454,8 @@ WebSocket open
 ## 多节点路由
 
 Phase 7 已实现 Redis 在线路由和 Server 注册心跳；Phase 8 已实现 RabbitMQ
-跨节点消息投递，但不做 ACK 回传到源节点，也不做全局消息总线去重。
+跨节点消息投递；Phase 9 增加了目标节点 ACK/Retry ownership、Route 迁移和
+MQ event 去重。
 
 单机 `SessionManager` 只保存本进程 live Channel；Redis route 保存
 `userId + deviceId -> serverId + connectionId` 并设置 TTL。连接鉴权成功后，
@@ -482,6 +495,61 @@ im:server:registry
 - `LOCAL`: route 指向当前 server 且本地 Session 存在，可以立即 Push
 - `REMOTE`: route 指向其他 server，Phase 8 通过 RabbitMQ 转发到目标 server
 - `OFFLINE`: Redis route 不存在，或者 route 指向当前 server 但本地 Session 不存在
+
+## Distributed Delivery Reliability
+
+系统采用：
+
+```text
+LOCAL
+  -> ClientConnection Push
+  -> device MESSAGE_ACK
+  -> owner Server timeout retry
+
+REMOTE
+  -> Redis Route
+  -> RabbitMQ relay event
+  -> target Server local Push
+  -> target Server owns Pending ACK / Retry
+
+OFFLINE / MQ failure / Server crash
+  -> Message remains in MySQL
+  -> reconnect uses Sequence Sync
+```
+
+目标设备真实连接所在的 Server 才创建 Pending ACK。ACK 不回传源 Server，
+因为源 Server 只负责业务消息持久化和 SEND_RESULT；设备级投递状态由连接所在
+节点管理，避免两个节点同时 Retry。
+
+`PendingAck` 当前保存在 Redis，包含：
+
+```text
+userId
+deviceId
+messageId
+connectionId
+ownerServerId
+deliveryId
+attempt
+nextRetryAt
+hopCount
+```
+
+Retry 前重新查询 Redis Route：
+
+- `LOCAL`: 使用当前 connectionId 重投
+- `REMOTE`: 通过 RabbitMQ 转发，源节点删除旧 Pending，目标节点重新建立 ownership
+- `OFFLINE`: 停止在线 Retry，等待 Sequence Sync
+
+同一 `eventId` 的 RabbitMQ 重复投递只处理一次；合法 Retry 使用新的
+`eventId`，所以不会被 dedup 错误拦截。允许极端竞态下重复 Push，客户端依靠
+`messageId` 去重，系统不宣称 Exactly Once。
+
+Server Crash 后，Redis Pending 不会随 JVM 一起丢失。Server 重启后只扫描
+`ownerServerId` 属于自己的 Pending，并在 Retry 前重新查 Route。宕机节点未接管的
+Pending 不做复杂的自动 failover；用户重连后的 Sequence Sync 仍是最终恢复路径。
+如果 RabbitMQ 在 Message 已写入 MySQL 后不可用，实时 Push 可能失败，但历史消息
+不会被删除。
 
 Redis route 只是在线定位，不是消息可靠性的最终来源。消息是否丢失仍以 MySQL
 持久化、ACK 和 Phase 5 Sequence Sync 共同保证。
@@ -709,17 +777,26 @@ Phase 3 测试覆盖：
 - 本机 Channel 仍由单进程 `SessionManager` 保存；Redis route 只保存跨节点在线位置
 - Phase 3 集成测试使用 H2 MySQL mode；生产运行配置仍使用 MySQL
 - Web 前端使用固定 Demo User List，不是好友系统
-- 已实现在线接收方 ACK、有限重投、离线增量同步、群聊、Redis route 和 RabbitMQ 跨节点转发
-- Phase 8 不做跨节点 ACK 返程、消息永久重放队列或全局 exactly-once
-- 未实现服务端设备游标、多端跨设备同步进度
+- 压测客户端位于 `tools/load-test/`，用于阶段性验证，不属于正式业务模块
+- 仍未实现严格的多节点 Pending ACK claim 互斥，当前以单次投递 ownership + 客户端去重为主
+- 仍未提供生产级观测平台和指标上报，性能数据目前依赖本地压测脚本和终端结果
+
+## 性能与故障验证
+
+实际压测和故障注入记录见：
+
+- [docs/performance.md](docs/performance.md)
+- [docs/failure-testing.md](docs/failure-testing.md)
 - 当前 CLI 客户端尚未提供
-- Redis Pending ACK 的多 Worker Claim Lock 暂未实现，当前按单节点扫描器设计
+- Redis Pending ACK 尚未实现多 Worker Claim Lock；当前通过 `ownerServerId` 做节点归属，
+  同一 owner 默认只运行一个 retry scanner
+- Server Registry 离线节点的 Pending ACK 不做自动 failover，依赖重连后的 Sequence Sync
 - 前端自动同步的 Conversation 列表来自本地 localStorage，第一次打开未知 Conversation
   不会自动发现全部历史会话
 
 ## TODO
 
-- Phase 9: 多端登录和独立同步位置
+- Phase 10: 性能、压测和多 Worker claim 机制
 
 ## 参考说明
 

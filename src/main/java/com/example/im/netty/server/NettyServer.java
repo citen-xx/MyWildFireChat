@@ -12,6 +12,7 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.TimeUnit;
 
 @Component
 public class NettyServer implements SmartLifecycle {
@@ -72,11 +73,11 @@ public class NettyServer implements SmartLifecycle {
             serverChannel = null;
         }
         if (workerGroup != null) {
-            workerGroup.shutdownGracefully().syncUninterruptibly();
+            workerGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
             workerGroup = null;
         }
         if (bossGroup != null) {
-            bossGroup.shutdownGracefully().syncUninterruptibly();
+            bossGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
             bossGroup = null;
         }
         running.set(false);

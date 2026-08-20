@@ -10,7 +10,25 @@ public interface PendingAckRepository {
 
     List<PendingAck> findDue(long nowMillis, int limit);
 
+    default List<PendingAck> findDue(long nowMillis, int limit, String ownerServerId) {
+        return findDue(nowMillis, limit).stream()
+                .filter(item -> ownerServerId == null
+                        || ownerServerId.isBlank()
+                        || item.ownerServerId() == null
+                        || item.ownerServerId().isBlank()
+                        || ownerServerId.equals(item.ownerServerId()))
+                .toList();
+    }
+
     boolean exists(Long userId, String deviceId, String messageId);
+
+    default void removeIfConnection(
+            Long userId,
+            String deviceId,
+            String messageId,
+            String connectionId) {
+        remove(userId, deviceId, messageId);
+    }
 
     long count();
 }

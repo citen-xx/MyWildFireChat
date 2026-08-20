@@ -54,6 +54,7 @@ public class RabbitMqRelayConfiguration {
         SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
         configurer.configure(factory, connectionFactory);
         factory.setMessageConverter(messageConverter);
+        factory.setDefaultRequeueRejected(false);
         return factory;
     }
 }

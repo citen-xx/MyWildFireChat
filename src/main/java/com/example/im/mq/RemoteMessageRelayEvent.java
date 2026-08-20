@@ -5,6 +5,7 @@ import com.example.im.message.service.SendMessageResult;
 public class RemoteMessageRelayEvent {
 
     private String deliveryId;
+    private String eventId;
     private String messageId;
     private String clientMessageId;
     private Long conversationId;
@@ -19,12 +20,15 @@ public class RemoteMessageRelayEvent {
     private String targetConnectionId;
     private String targetServerId;
     private String sourceServerId;
+    private int attempt;
+    private int hopCount;
 
     public RemoteMessageRelayEvent() {
     }
 
     public RemoteMessageRelayEvent(
             String deliveryId,
+            String eventId,
             String messageId,
             String clientMessageId,
             Long conversationId,
@@ -38,8 +42,11 @@ public class RemoteMessageRelayEvent {
             String targetDeviceId,
             String targetConnectionId,
             String targetServerId,
-            String sourceServerId) {
+            String sourceServerId,
+            int attempt,
+            int hopCount) {
         this.deliveryId = deliveryId;
+        this.eventId = eventId;
         this.messageId = messageId;
         this.clientMessageId = clientMessageId;
         this.conversationId = conversationId;
@@ -54,18 +61,24 @@ public class RemoteMessageRelayEvent {
         this.targetConnectionId = targetConnectionId;
         this.targetServerId = targetServerId;
         this.sourceServerId = sourceServerId;
+        this.attempt = attempt;
+        this.hopCount = hopCount;
     }
 
     public static RemoteMessageRelayEvent of(
             String deliveryId,
+            String eventId,
             SendMessageResult message,
             Long targetUserId,
             String targetDeviceId,
             String targetConnectionId,
             String targetServerId,
-            String sourceServerId) {
+            String sourceServerId,
+            int attempt,
+            int hopCount) {
         return new RemoteMessageRelayEvent(
                 deliveryId,
+                eventId,
                 message.messageId(),
                 message.clientMessageId(),
                 message.conversationId(),
@@ -79,21 +92,33 @@ public class RemoteMessageRelayEvent {
                 targetDeviceId,
                 targetConnectionId,
                 targetServerId,
-                sourceServerId);
+                sourceServerId,
+                attempt,
+                hopCount);
     }
 
     public static String stableDeliveryId(
-            String sourceServerId,
             SendMessageResult message,
             Long targetUserId,
-            String targetDeviceId,
-            String targetConnectionId) {
+            String targetDeviceId) {
         return String.join("|",
-                sourceServerId == null ? "" : sourceServerId,
                 message.messageId() == null ? "" : message.messageId(),
                 String.valueOf(targetUserId == null ? 0L : targetUserId),
-                targetDeviceId == null ? "" : targetDeviceId,
-                targetConnectionId == null ? "" : targetConnectionId);
+                targetDeviceId == null ? "" : targetDeviceId);
+    }
+
+    public static String stableEventId(
+            String sourceServerId,
+            String deliveryId,
+            String targetServerId,
+            int attempt,
+            int hopCount) {
+        return String.join("|",
+                sourceServerId == null ? "" : sourceServerId,
+                deliveryId == null ? "" : deliveryId,
+                targetServerId == null ? "" : targetServerId,
+                String.valueOf(attempt),
+                String.valueOf(hopCount));
     }
 
     public SendMessageResult toMessageResult() {
@@ -116,6 +141,14 @@ public class RemoteMessageRelayEvent {
 
     public void setDeliveryId(String deliveryId) {
         this.deliveryId = deliveryId;
+    }
+
+    public String getEventId() {
+        return eventId;
+    }
+
+    public void setEventId(String eventId) {
+        this.eventId = eventId;
     }
 
     public String getMessageId() {
@@ -228,5 +261,21 @@ public class RemoteMessageRelayEvent {
 
     public void setSourceServerId(String sourceServerId) {
         this.sourceServerId = sourceServerId;
+    }
+
+    public int getAttempt() {
+        return attempt;
+    }
+
+    public void setAttempt(int attempt) {
+        this.attempt = attempt;
+    }
+
+    public int getHopCount() {
+        return hopCount;
+    }
+
+    public void setHopCount(int hopCount) {
+        this.hopCount = hopCount;
     }
 }
