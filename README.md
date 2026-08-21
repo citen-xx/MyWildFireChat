@@ -1,269 +1,41 @@
-# My Wildfire Chat
-
-## 项目介绍
-
-这是一个用于 Java 后端学习和简历讲解的精简 IM 系统。项目参考
-WildfireChat 的长连接、会话、投递和同步设计思想，但不复制其源码、
-包名、MQTT 协议或工程结构。
-
-当前已完成到 Phase 10：在单聊、ACK、离线增量同步、群聊、Redis 在线路由、
-RabbitMQ 跨节点投递和多端同步基础上，补充了独立压测客户端、性能基线和
-故障注入验证。
-
-## Architecture
-
-```text
-Client
-  -> Netty TCP 9000
-  -> LengthFieldBasedFrameDecoder
-  -> Protobuf MessageEnvelope
-  -> AuthHandler
-  -> HeartbeatHandler
-  -> MessageHandler
-  -> Application Service
-  -> MySQL / Redis / RabbitMQ
-
-REST Client
-  -> Spring Boot HTTP 8080
-  -> Controller
-  -> Application Service
-```
-
-Phase 7 已能把 `userId + deviceId` 的在线位置写入 Redis，并区分本机、
-远端和离线连接。RabbitMQ 跨节点转发留到 Phase 8。
-
-## 模块说明
-
-```text
-com.example.im
-├── auth              # login, JWT, user credential loading
-├── conversation      # Phase 3: conversation creation and members
-├── group             # Phase 6: group and group members
-├── message           # Phase 3-5: persistence, sequence, ack, sync
-├── mq                # Phase 8: RabbitMQ cross-node forwarding
-├── netty
-│   ├── handler       # Netty inbound handlers
-│   ├── protocol      # generated Protobuf Java classes
-│   ├── server        # Netty bootstrap and lifecycle
-│   └── session       # Phase 2: live channel sessions
-├── route             # Phase 7: Redis online routing
-└── common            # shared response, error, utilities
-```
-
-## 数据库设计
-
-当前 schema 文件：`src/main/resources/db/schema.sql`
-
-已创建：
-
-- `user_account`: 登录用户表，包含 `id`, `username`, `password_hash`, `status`
-- `uk_user_account_username`: 保证用户名唯一
-- `conversation`: 会话表，`biz_key` 唯一
-- `conversation_member`: 会话成员表，`(conversation_id, user_id)` 联合主键
-- `message`: 消息表
-- `chat_group`: 群资料表
-- `group_member`: 群成员表
-
-当前种子数据文件：`src/main/resources/db/data.sql`
-
-- `alice / password123`, userId: `1001`
-- `bob / password123`, userId: `1002`
-- `charlie / password123`, userId: `1003`
-
-`message` 关键约束：
-
-- `UNIQUE(message_id)`: 服务端业务消息 ID 全局唯一
-- `UNIQUE(sender_id, client_message_id)`: 客户端重试幂等
-- `UNIQUE(conversation_id, sequence)`: 会话内 sequence 不重复
-
-## Redis Key
-
-当前使用：
-
-- `im:seq:{conversationId}`: Conversation sequence counter，Phase 3 使用 Redis `INCR`
-- `im:route:{userId}:{deviceId}`: Redis HASH，字段为 `userId`, `deviceId`,
-  `serverId`, `connectionId`, `connectedAt`，带 TTL
-- `im:user:devices:{userId}`: Redis SET，记录某个用户当前出现过的在线 deviceId，
-  用于查找多端设备，带 TTL
-- `im:server:registry`: Redis ZSET，member 为 `serverId`，score 为最近心跳时间戳
-- `im:pending_ack:{userId}:{deviceId}`: Redis ZSET，member 为 `messageId`，
-  score 为下一次重投时间戳
-- `im:pending_ack_attempt:{userId}:{deviceId}`: Redis Hash，field 为
-  `messageId`，value 为当前 retry attempt
-- `im:pending_ack:index`: Redis ZSET，全局扫描索引，member 为
-  `userId|base64url(deviceId)|base64url(messageId)`，score 为下一次重投时间戳
-
-## RabbitMQ Exchange / Queue
-
-当前 Docker Compose 已提供 RabbitMQ。Phase 8 中 RabbitMQ 只用于跨 IM
-节点消息转发，不用于普通异步落库或延迟队列。
-
-当前约定：
-
-- Exchange: `im.message.relay`
-- Queue: `im.message.relay.{serverId}`
-- Routing Key: `serverId`
-- `deliveryId`: `messageId|targetUserId|targetDeviceId`，表示一条消息到一个设备的逻辑投递
-- `eventId`: `sourceServerId|deliveryId|targetServerId|attempt|hopCount`，表示一次 RabbitMQ transport event
-- MQ 去重键: `eventId`
-- Relay 去重 TTL: 默认 30 秒
-
-Phase 8 的跨节点流程是：
-
-```text
-源节点
-  -> ConnectionLocator 发现 REMOTE
-  -> RabbitMQ publish relay event
-  -> 目标节点 queue consume
-  -> 目标节点校验 targetServerId / targetConnectionId
-  -> 本机 Session push
-  -> AckService.recordPush
-  -> 目标节点创建本机 owner 的 Pending ACK
-```
-
-Phase 9 以后，RabbitMQ 的 consumer duplicate 和合法 retry 分开处理：
-
-- 同一个 `eventId` 重复消费，只处理一次
-- 同一个 `deliveryId` 使用新的 `eventId` 和更高 `attempt`，允许再次 Push
-- `hopCount` 默认最多 2，防止 Route 抖动造成跨节点转发循环
-
-## Message Protocol
-
-当前 Protobuf 文件：`src/main/proto/im_protocol.proto`
-
-`MessageEnvelope` 字段：
-
-- `message_type`
-- `request_id`
-- `timestamp`
-- `payload`
-
-已定义类型：
-
-- `CONNECT`, `CONNECT_ACK`
-- `PING`, `PONG`
-- `SEND_MESSAGE`, `SEND_RESULT`, `PUSH_MESSAGE`
-- `MESSAGE_ACK`
-- `SYNC_REQUEST`, `SYNC_RESPONSE`, `SYNC_COMPLETE`
-- `ERROR`
-
-Phase 2 已实现 payload：
-
-- `ConnectRequest(token, deviceId)`
-- `ConnectAck(userId, deviceId, serverTime)`
-- `ErrorPayload(code, message)`
-
-Phase 3 已实现 payload：
-
-- `SendMessageRequest(clientMessageId, receiverId, content, messageType)`
-- `SendResult(clientMessageId, messageId, conversationId, sequence, createdAt)`
-- `PushMessage(messageId, clientMessageId, conversationId, sequence, senderId, receiverId, content, messageType, createdAt)`
-
-Phase 4 已实现 payload：
-
-- `MessageAck(messageId, conversationId, sequence)`
-
-Phase 5 已实现 payload：
-
-- `SyncRequest(conversationId, lastSequence, optional limit)`
-- `SyncResponse(conversationId, messages, hasMore, nextSequence)`
-- `SyncComplete(conversationId, nextSequence)`
-
-`SendResult` 只表示服务端已经成功接收并持久化，不表示接收方已经收到。
-RabbitMQ consumer ACK 只表示目标 IM Server 已经消费 relay event。
-`MessageAck` 表示接收方某个 `userId + deviceId` 连接已经收到并处理了
-`PUSH_MESSAGE`。这三种确认互不替代。
-
-TCP framing 使用 4 字节 length field，避免 TCP 粘包拆包问题。
-
-## 单聊发送链路
-
-```text
-Client A
-  -> SEND_MESSAGE(clientMessageId, receiverId, content, messageType)
-  -> AuthHandler confirms CONNECT
-  -> MessageHandler reads senderId from Session
-  -> MessageService
-  -> ConversationService get-or-create single conversation
-  -> Redis INCR im:seq:{conversationId}
-  -> MySQL insert message
-  -> SEND_RESULT to Client A
-  -> ConnectionLocator finds receiver devices from local Session / Redis route
-  -> PUSH_MESSAGE to each local Channel
-  -> remote target is forwarded through RabbitMQ
-  -> target Server owns the device Pending ACK and Retry
-```
-
-客户端不能在 `SendMessageRequest` 中提供 `senderId`。服务端只使用
-`SessionManager` 中 CONNECT 时绑定的 userId。
-
-如果接收方离线，本阶段只完成 MySQL 落库，不主动补偿；离线同步放到 Phase 5。
-
-## Conversation 唯一性
-
-单聊使用规范化 key：
-
-```text
-single:min(userIdA, userIdB):max(userIdA, userIdB)
-```
-
-因此 `1001 -> 1002` 和 `1002 -> 1001` 都得到：
-
-```text
-single:1001:1002
-```
-
-Java 层先查询只是优化；最终依靠 `UNIQUE(biz_key)` 处理两个线程首次并发
-创建的情况。插入冲突后重新查询已有 Conversation，不使用 JVM 锁替代数据库约束。
-
-## clientMessageId 幂等
-
-`clientMessageId` 是客户端发送前生成的请求 ID；`messageId` 是服务端成功落库
-后生成的全局业务消息 ID。
-
-服务端先查询 `(sender_id, client_message_id)`。并发重复请求即使同时通过了
-第一次查询，也会被数据库唯一约束拦住；服务端随后查询并返回第一次落库的
-`messageId` 和 `sequence`，不会重复插入消息。
-
-## 登录与 CONNECT 鉴权
-
-HTTP 登录：
-
-```text
-POST /api/auth/login
-Content-Type: application/json
-
-{
-  "username": "alice",
-  "password": "password123"
-}
-```
-
-成功后返回：
-
-```text
-{
-  "userId": 1001,
-  "username": "alice",
-  "token": "...",
-  "expiresAt": 1786968000
-}
-```
-
-Netty 客户端建立 TCP 连接后，第一条业务消息必须是：
-
-```text
-MessageEnvelope(
-  messageType = CONNECT,
-  payload = ConnectRequest(token, deviceId)
-)
-```
-
-服务端链路：
+# Distributed IM Server
+
+一个基于 Spring Boot、Netty、WebSocket 和 Protobuf 的分布式即时通讯学习项目。
+
+项目重点不是复杂聊天 UI，而是 IM Server 的核心基础设施：TCP 长连接、JWT/CONNECT
+鉴权、多设备 Session、消息持久化、ACK/Retry、Sequence Sync、Redis 在线路由和
+RabbitMQ 跨节点实时投递。
+
+本项目研究过 WildfireChat 的长连接、Session、消息投递和同步设计，但没有复制其
+源码、包名、MQTT 协议或工程结构。当前实现是独立编写的教学版本。
+
+## Tech Stack
+
+| Layer | Technology |
+| --- | --- |
+| Backend | Java 17+, Spring Boot 3.3 |
+| TCP | Netty 4.1 |
+| Browser Transport | Spring WebSocket |
+| Protocol | Protobuf over TCP, JSON over WebSocket |
+| Persistence | MySQL 8.4 |
+| ORM | MyBatis-Plus |
+| Cache / Route | Redis 7.4 |
+| Cross-Node Transport | RabbitMQ 4.0 |
+| Frontend | Vue 3 + TypeScript + Vite |
+| Build / Test | Maven, JUnit, Spring Boot Integration Test |
+| Infrastructure | Docker Compose |
+
+## Core Features
+
+### Long Connection and Protocol
+
+Netty TCP 默认监听 `9000`，使用长度字段解决 TCP 粘包拆包，再解码自定义
+`MessageEnvelope`。浏览器使用 `ws://localhost:8080/ws/im`，通过 JSON 适配器
+复用同一套消息业务服务。
 
 ```text
 LengthFieldBasedFrameDecoder
-  -> ProtobufDecoder(MessageEnvelope)
+  -> Protobuf Decoder
   -> IdleStateHandler
   -> AuthHandler
   -> HeartbeatHandler
@@ -271,534 +43,312 @@ LengthFieldBasedFrameDecoder
   -> SessionCleanupHandler
 ```
 
-`AuthHandler` 只负责协议入口判断；JWT 校验和 Session 绑定下沉到
-`NettyAuthService`。鉴权成功返回 `CONNECT_ACK`，鉴权失败返回 `ERROR` 并关闭
-Channel。
+客户端先调用 `POST /api/auth/login` 获取 JWT，再通过 CONNECT 携带
+`token + deviceId`。服务端从 JWT 获取 `userId`，不信任客户端提交的 senderId。
 
-## SessionManager
+### Multi-device Session
 
-Session 是设备级别，而不是用户级别：
-
-```text
-SessionKey(userId, deviceId) -> Channel
-ChannelId -> SessionKey
-Channel.attr("im.session") -> ImSession
-```
-
-实现文件：`src/main/java/com/example/im/netty/session/SessionManager.java`
-
-并发设计：
-
-- 使用 `ConcurrentHashMap` 存储在线 Channel 和反向索引
-- `bind` / `remove` 使用 `synchronized` 保护跨 Map 的复合更新
-- 相同 `userId + deviceId` 重复登录时，新 Channel 替换旧 Channel，并关闭旧连接
-- 旧 Channel 后续触发 `channelInactive` 时，只会移除自己对应的旧映射，不会误删新连接
-- Channel 断开时由 `SessionCleanupHandler` 调用 `SessionManager.remove(channel)`
-
-## 心跳机制
-
-客户端发送 `PING`，服务端返回相同 `requestId` 的 `PONG`。
-
-`IdleStateHandler` 使用 `im.netty.reader-idle-seconds` 配置读空闲时间，默认
-60 秒。如果服务端在这段时间内没有读到任何消息，就关闭 Channel，随后触发
-Session 清理。
-
-## ACK 机制
-
-Phase 4 实现 Receiver ACK：
+Session 以设备为粒度：
 
 ```text
-Server
-  -> PUSH_MESSAGE
-  -> Receiver Client
-  -> MESSAGE_ACK(messageId, conversationId, sequence)
-  -> AckService removes Pending ACK
+userId + deviceId -> Channel
+ChannelId -> Session
 ```
 
-`SEND_RESULT` 和 `MESSAGE_ACK` 是两种不同确认：
+同一设备重复连接时，新连接替换旧连接。断开的旧连接通过 `connectionId`
+ownership 校验，不能误删新连接的本地 Session 或 Redis Route。
 
-- `SEND_RESULT`: 发送方 A 的消息已经被服务端持久化
-- `MESSAGE_ACK`: 接收方 B 的某个设备已经收到并完成客户端处理
+### Direct and Group Chat
 
-Pending ACK 是设备级别的。Bob 同时在线 `web` 和 `pc` 时，会分别记录：
+单聊和群聊共享 Conversation、Message、Sequence 和 Delivery 模型。单聊使用规范化
+key：
 
 ```text
-im:pending_ack:1002:web
-im:pending_ack:1002:pc
+single:min(userIdA, userIdB):max(userIdA, userIdB)
 ```
 
-`web` ACK 只删除 `web` 的 pending，不代表 `pc` 已收到。
+`message` 表保存一份业务消息；群聊向在线成员 Fan-out。客户端生成
+`clientMessageId`，服务端生成全局唯一 `messageId`，并通过数据库唯一约束实现幂等。
 
-ACK 删除天然幂等：重复 `MESSAGE_ACK(messageId)` 时，第一次删除 Pending ACK，
-后续删除不到记录也视为成功。
+### Reliable Delivery and Recovery
 
-## Message Delivery Semantics
-
-当前在线投递语义是 At-Least-Once Delivery，不是 Exactly Once。
-
-服务端向在线设备 Push 后写入 Redis Pending ACK。如果超时未收到 ACK，
-`AckRetryScheduler` 会在独立线程中扫描 `im:pending_ack:index`，根据
-`messageId` 回表读取 MySQL 消息，再推送给仍在线的同一设备。
-
-默认重试策略：
+在线投递：
 
 ```text
-initial push
-  -> 3s retry 1
-  -> 3s retry 2
-  -> 5s retry 3
-  -> stop online retry
+PUSH_MESSAGE -> Pending ACK -> MESSAGE_ACK -> Timeout Retry
 ```
 
-停止在线重试不代表消息丢失，消息已经在 MySQL 中。Phase 5 使用
-Conversation Sequence 增量同步补偿断线和离线期间的消息。
+系统语义是 **At-Least-Once Delivery**，不是 Exactly Once。客户端按 `messageId`
+去重，重复 Push 不重复展示，但仍然再次发送 ACK。
 
-如果设备断开连接，调度器会删除该设备的 Pending ACK，停止即时重投，等待
-后续离线同步恢复。
+消息长期保存于 MySQL。客户端重连后以 Conversation Sequence 调用
+`SYNC_REQUEST(lastSequence)`，按 sequence 增量恢复历史消息。
 
-当前 Web 前端收到 `PUSH_MESSAGE` 后，先按 `messageId` 检查本地消息列表：
+ACK 解决“某个在线设备是否处理了实时 Push”；SYNC 解决断线、离线和实时链路失败后的
+历史缺口，两者互补。
 
-- 未处理过：追加到页面消息状态
-- 已处理过：不重复展示
-- 两种情况都会继续发送 `MESSAGE_ACK`
+### Distributed Route and Cross-node Delivery
 
-当前 ACK 语义代表“当前页面进程已经接收并处理”，不是“消息已经永久写入客户端磁盘”。
-后续如果引入 IndexedDB，再把 ACK 发送时机移动到本地持久化成功之后。
-
-调度器使用独立 `ScheduledExecutorService`，不会在 Netty EventLoop 中
-`sleep` 或阻塞等待 ACK。
-
-多 Worker 抢同一条 Redis due item 的严格 Claim Lock 尚未实现；当前项目仍是
-单节点在线投递。未来多节点阶段需要用 Lua 或短租约字段保证扫描任务的互斥领取。
-
-## Sequence 机制
-
-Phase 3 使用 Redis `INCR im:seq:{conversationId}` 分配 sequence。
-
-sequence 只要求同一 Conversation 内严格递增和唯一，不要求严格连续。
-例如 Redis 分配了 `3`，但随后 MySQL 插入失败，下一条消息可能使用 `4`，
-因此出现 `1, 2, 4` 的空洞。
-
-空洞是可接受的，因为 sequence 的用途是排序和增量游标，不是数据库行号。
-MySQL 通过 `UNIQUE(conversation_id, sequence)` 作为最终约束。
-
-Redis 和 MySQL 之间不是强一致事务：Redis INCR 成功后，MySQL 可能失败。
-本阶段不回收 sequence，也不宣称 Redis/MySQL 分布式事务。
-
-## 离线同步机制
-
-Phase 5 不创建单独的“离线消息副本表”。所有消息统一保存在 `message` 表，
-客户端根据每个 Conversation 的连续游标请求缺口：
-
-```sql
-SELECT ...
-FROM message
-WHERE conversation_id = ?
-  AND sequence > ?
-ORDER BY sequence ASC
-LIMIT ?
-```
-
-TCP 和 WebSocket 在鉴权完成后都支持：
+Redis 保存：
 
 ```text
-SYNC_REQUEST
-  -> SYNC_RESPONSE
-  -> (hasMore = false) SYNC_COMPLETE
+userId + deviceId -> serverId + connectionId
 ```
 
-默认单页 100 条，最大 200 条。客户端请求超过 200 时服务端限制为 200，
-避免一次读取无限历史。`SYNC_RESPONSE.nextSequence` 是当前页最后一条消息的
-sequence；客户端用它请求下一页。没有新增消息时，`nextSequence` 保持请求中的
-`lastSequence`。
-
-服务端先校验当前 CONNECT Session 的 userId 是否属于该 Conversation，再执行
-查询，不能相信客户端传入的 userId，也不会把不存在的 Conversation 与无权限
-Conversation 的差异暴露给客户端。
-
-Web 前端为每个 `userId + deviceId + conversationId` 保存游标：
+Route 通过 TTL 和 Server Heartbeat 清理脏数据。跨节点发送流程：
 
 ```text
-im:conversations:{userId}:{deviceId}
-im:cursor:{userId}:{deviceId}:{conversationId}
+Redis Route
+  -> RabbitMQ Direct Exchange
+  -> Target Server Queue
+  -> Local Channel
+  -> Device ACK
 ```
 
-游标使用 contiguous sequence，而不是简单的最大 sequence。收到 `103` 但
-尚未收到 `102` 时，客户端暂存 `103`，游标仍停在 `101`；收到 `102` 后再
-连续推进到 `103`。PUSH 和 SYNC 都经过 messageId 去重，并按 sequence 排序。
+RabbitMQ 只负责跨 IM Server 的实时 Transport，不作为消息事实源，也不用于普通异步
+落库或延迟队列。
 
-重连流程是：
+## Architecture
 
-```text
-WebSocket open
-  -> CONNECT
-  -> CONNECT_ACK
-  -> SYNC_REQUEST
-  -> SYNC_RESPONSE / SYNC_COMPLETE
-  -> Online
+```mermaid
+flowchart LR
+    A[Client A] --> S1[IM Server 1]
+    S1 --> DB[(MySQL<br/>Message Truth Source)]
+    S1 --> R[(Redis<br/>Sequence / Route / ACK State)]
+    S1 --> MQ[(RabbitMQ<br/>Cross-node Transport)]
+    MQ --> S2[IM Server 2]
+    R --> S2
+    S2 --> B[Client B]
 ```
 
-同步历史消息不会创建 `Pending ACK`。在线消息使用 `PUSH_MESSAGE + MESSAGE_ACK`
-和有限重试；断线或离线消息使用 MySQL 持久化和 Sequence Sync。这两套机制互补：
+```mermaid
+sequenceDiagram
+    participant A as Alice
+    participant S1 as Server 1
+    participant DB as MySQL
+    participant R as Redis
+    participant MQ as RabbitMQ
+    participant S2 as Server 2
+    participant B as Bob
 
-- ACK 解决在线实时 Push 是否被某个设备接收，不能覆盖断线期间尚未 Push 的消息。
-- Sequence Sync 解决断线、重启和 ACK 丢失后的消息缺口，但它是重新连接后的主动
-  拉取，不能替代在线投递的低延迟确认和有限重试。
+    A->>S1: SEND_MESSAGE
+    S1->>DB: Persist message
+    DB-->>S1: messageId + sequence
+    S1-->>A: SEND_RESULT
+    S1->>R: Lookup Bob route
+    S1->>MQ: Publish relay event
+    MQ->>S2: Consume target queue
+    S2->>B: PUSH_MESSAGE
+    B-->>S2: MESSAGE_ACK
+```
 
-当前没有服务端 `device_conversation_cursor` 表，游标由客户端 localStorage
-维护。这样实现简单、写放大较小，但清理浏览器数据会丢失游标，需要重新拉取历史。
-首次打开尚未记录的 Conversation 也暂时从 sequence 0 开始，没有做“优先最近 N 条”
-的历史加载优化。前端消息状态还没有 IndexedDB 持久化，因此当前 ACK 仍表示
-“页面进程已接收并处理”，不代表消息已经永久写入客户端磁盘。
+`SEND_RESULT` 表示消息已被服务端持久化；`MESSAGE_ACK` 表示接收方某个设备已经
+接收并处理 Push，二者语义完全不同。
 
-## 多节点路由
+## Reliability Model
 
-Phase 7 已实现 Redis 在线路由和 Server 注册心跳；Phase 8 已实现 RabbitMQ
-跨节点消息投递；Phase 9 增加了目标节点 ACK/Retry ownership、Route 迁移和
-MQ event 去重。
-
-单机 `SessionManager` 只保存本进程 live Channel；Redis route 保存
-`userId + deviceId -> serverId + connectionId` 并设置 TTL。连接鉴权成功后，
-`ConnectionRouteService` 异步注册 route；收到 `PING` 时异步刷新 TTL；
-Channel 断开时按 `connectionId` 条件删除 route。
-
-Redis Route 数据结构：
+### Core Redis Keys
 
 ```text
+im:seq:{conversationId}
 im:route:{userId}:{deviceId}
-  userId       -> 1002
-  deviceId     -> web
-  serverId     -> im-server-2
-  connectionId -> ws:...
-  connectedAt  -> epoch millis
-
 im:user:devices:{userId}
-  web
-  pc
-
 im:server:registry
-  ZSET member = serverId
-  ZSET score  = lastHeartbeatTimestamp
+im:pending_ack:{userId}:{deviceId}
+im:pending_ack_attempt:{userId}:{deviceId}
+im:pending_ack_meta:{userId}:{deviceId}
+im:pending_ack:index
+im:pending_ack:owner:{serverId}
+im:relay:delivery:{eventId}
 ```
 
-`ServerHeartbeatScheduler` 在应用启动后定期写入 `im:server:registry`，并清理
-超过 `im.server.offline-timeout-seconds` 的 serverId。优雅停机时会 best-effort
-移除当前 server；进程崩溃时依靠 route TTL 和 server 心跳过期清理脏数据。
+### Delivery Identity
 
-重复登录采用 Last Writer Wins：同一 `userId + deviceId` 新连接覆盖旧 route。
-旧 Channel 后续断开时，Lua 脚本会比较 `connectionId`，只有 owner 匹配才删除，
-避免旧连接误删新连接。`PING` 刷新同样按 owner 校验；如果 Redis key 因 TTL
-消失，当前连接的下一次心跳会重新注册 route。
+- `messageId`：业务消息全局 ID
+- `deliveryId`：消息投递到一个设备的稳定 ID
+- `eventId`：一次 RabbitMQ transport event 的 ID
 
-`ConnectionLocator` 查询某个接收方设备时会返回：
+相同 `eventId` 的 MQ 重复消费会去重；合法 Retry 使用新的 `eventId`，但保持相同的
+`deliveryId`。系统不宣称 Exactly Once。
 
-- `LOCAL`: route 指向当前 server 且本地 Session 存在，可以立即 Push
-- `REMOTE`: route 指向其他 server，Phase 8 通过 RabbitMQ 转发到目标 server
-- `OFFLINE`: Redis route 不存在，或者 route 指向当前 server 但本地 Session 不存在
+### Database Model
 
-## Distributed Delivery Reliability
+| Table | Purpose |
+| --- | --- |
+| `user_account` | 登录用户 |
+| `conversation` | DIRECT / GROUP 会话 |
+| `conversation_member` | 会话成员 |
+| `message` | 消息事实源 |
+| `chat_group` | 群资料 |
+| `group_member` | 群成员 |
 
-系统采用：
+关键约束：
 
 ```text
-LOCAL
-  -> ClientConnection Push
-  -> device MESSAGE_ACK
-  -> owner Server timeout retry
-
-REMOTE
-  -> Redis Route
-  -> RabbitMQ relay event
-  -> target Server local Push
-  -> target Server owns Pending ACK / Retry
-
-OFFLINE / MQ failure / Server crash
-  -> Message remains in MySQL
-  -> reconnect uses Sequence Sync
+UNIQUE(conversation.biz_key)
+UNIQUE(message.message_id)
+UNIQUE(message.sender_id, message.client_message_id)
+UNIQUE(message.conversation_id, message.sequence)
+UNIQUE(group_member.group_id, group_member.user_id)
 ```
 
-目标设备真实连接所在的 Server 才创建 Pending ACK。ACK 不回传源 Server，
-因为源 Server 只负责业务消息持久化和 SEND_RESULT；设备级投递状态由连接所在
-节点管理，避免两个节点同时 Retry。
+## Engineering Notes
 
-`PendingAck` 当前保存在 Redis，包含：
+### Fast ACK Race
+
+曾发现低延迟客户端可能在 Pending ACK 写入前返回 ACK：
 
 ```text
-userId
-deviceId
-messageId
-connectionId
-ownerServerId
-deliveryId
-attempt
-nextRetryAt
-hopCount
+旧逻辑：sendPush() -> register Pending ACK
+新逻辑：register Pending ACK -> sendPush()
 ```
 
-Retry 前重新查询 Redis Route：
+该顺序已通过回归测试验证，避免 ACK 已处理但 Pending 记录随后又被创建。
 
-- `LOCAL`: 使用当前 connectionId 重投
-- `REMOTE`: 通过 RabbitMQ 转发，源节点删除旧 Pending，目标节点重新建立 ownership
-- `OFFLINE`: 停止在线 Retry，等待 Sequence Sync
+### Failure Semantics
 
-同一 `eventId` 的 RabbitMQ 重复投递只处理一次；合法 Retry 使用新的
-`eventId`，所以不会被 dedup 错误拦截。允许极端竞态下重复 Push，客户端依靠
-`messageId` 去重，系统不宣称 Exactly Once。
+| Failure | Behavior |
+| --- | --- |
+| MySQL unavailable | 新消息不能持久化，也不能报告 SEND 成功 |
+| Redis unavailable | Route、Sequence 或短期投递状态受影响，历史消息仍在 MySQL |
+| RabbitMQ unavailable | 跨节点实时投递受影响，后续可由 SYNC 恢复 |
+| ACK loss | 有限 Retry，客户端按 messageId 去重 |
+| Server crash | Route 依靠 TTL/Heartbeat 清理，重连后通过 SYNC 恢复 |
 
-Server Crash 后，Redis Pending 不会随 JVM 一起丢失。Server 重启后只扫描
-`ownerServerId` 属于自己的 Pending，并在 Retry 前重新查 Route。宕机节点未接管的
-Pending 不做复杂的自动 failover；用户重连后的 Sequence Sync 仍是最终恢复路径。
-如果 RabbitMQ 在 Message 已写入 MySQL 后不可用，实时 Push 可能失败，但历史消息
-不会被删除。
+ACK race、跨节点投递和多设备 ACK 已有测试记录。正式网络丢包、RabbitMQ Broker
+崩溃重放和 MySQL 事务中途 kill 尚未系统化验证，详见
+[docs/failure-testing.md](docs/failure-testing.md)。
 
-Redis route 只是在线定位，不是消息可靠性的最终来源。消息是否丢失仍以 MySQL
-持久化、ACK 和 Phase 5 Sequence Sync 共同保证。
+## Performance Baseline
 
-## Web Client
+以下是本地开发环境的工程基线，不代表生产容量或系统上限：
 
-Phase 3 之后新增一个最小可用 Web 前端，用于浏览器演示 Alice/Bob 单聊。
+| Scenario | Recorded Result |
+| --- | --- |
+| TCP connections | 100 connections, 100% established |
+| Connection latency | P50 3.46ms, P95 4.95ms at 100 connections |
+| Direct chat | 32B payload, baseline exercised up to 50 MPS |
+| 1KB payload | 20 MPS scenario completed |
+| 100-member group | 300 Pushes, all ACKed |
+| Cross-node chat | 10/10 RabbitMQ relays delivered and ACKed |
 
-前端技术栈：
+完整群聊 Fan-out 数据和测试环境见 [docs/performance.md](docs/performance.md)。
 
-- Vue 3
-- Vite
-- TypeScript
-- Axios
-- 原生 CSS
-
-前端目录：`frontend/`
-
-WebSocket 地址：
+## Project Structure
 
 ```text
-ws://localhost:8080/ws/im
+src/main/java/com/example/im
+├── auth            # Login and JWT
+├── conversation   # Conversation
+├── group          # Group management
+├── message        # Persistence, ACK, delivery, sync
+├── netty          # TCP server, protocol, handlers, sessions
+├── websocket      # Browser JSON adapter
+├── route          # Redis route and server registry
+└── mq             # RabbitMQ relay
+
+frontend/           # Vue 3 client
+tools/load-test/    # Real TCP load-test client
+scripts/            # Benchmark preparation
+docs/               # Performance and failure notes
 ```
 
-开发环境前端从 `http://localhost:5173` 访问时，Vite 会把 `/ws/im` 代理到
-后端 `ws://localhost:8080/ws/im`。直接连接后端时使用上面的地址。选择 Spring
-WebSocket 挂在 8080，是因为当前项目已经有 Spring Boot Web。
-这样浏览器 WebSocket 可以直接注入并复用 `JwtService`、`SessionManager`、
-`MessageService`、`ConversationService`，不需要再启动一个独立的 Netty
-WebSocket Server，也不会复制一套聊天业务。
+## Quick Start
 
-WebSocket JSON 协议：
+### Infrastructure
 
-```json
-{
-  "type": "CONNECT",
-  "requestId": "uuid",
-  "token": "jwt-token",
-  "deviceId": "web-device-id"
-}
-```
-
-```json
-{
-  "type": "SEND_MESSAGE",
-  "requestId": "client-message-id",
-  "payload": {
-    "clientMessageId": "uuid",
-    "receiverId": 1002,
-    "content": "hello bob",
-    "messageType": "TEXT"
-  }
-}
-```
-
-服务端返回：
-
-- `CONNECT_ACK`: WebSocket 鉴权成功
-- `SEND_RESULT`: 服务端已接收并持久化
-- `PUSH_MESSAGE`: 在线接收方收到推送
-- `MESSAGE_ACK`: 浏览器收到 `PUSH_MESSAGE` 后发回的接收方确认
-- `SYNC_REQUEST`: CONNECT_ACK 后按 Conversation 游标请求增量消息
-- `SYNC_RESPONSE`: 返回一页按 sequence 升序排列的历史消息
-- `SYNC_COMPLETE`: 当前 Conversation 没有更多待同步消息
-- `ERROR`: 协议或鉴权错误
-- `PONG`: 心跳响应
-
-WebSocket 只是协议适配层：
-
-```text
-Browser JSON
-  -> ImWebSocketHandler
-  -> SendMessageCommand
-  -> MessageService
-  -> ConversationService / MySQL / Redis sequence
-  -> MessageDeliveryService
-  -> ConnectionLocator
-  -> WebSocketClientConnection or NettyClientConnection
-```
-
-TCP 仍走：
-
-```text
-Protobuf
-  -> MessageHandler
-  -> SendMessageCommand
-  -> MessageService
-```
-
-也就是说，TCP 和 WebSocket 最终复用同一套业务服务。
-
-## 如何运行
-
-启动依赖：
-
-```text
+```powershell
 docker compose up -d mysql redis rabbitmq
 ```
 
-启动应用：
+默认端口：
 
 ```text
+HTTP 8080 | Netty TCP 9000 | MySQL 3307
+Redis 6380 | RabbitMQ 5672 | RabbitMQ Management 15672
+```
+
+### Backend
+
+```powershell
 mvn spring-boot:run
 ```
 
-启动前端：
+### Web Client
 
-```text
+```powershell
 cd frontend
 npm install
 npm run dev
 ```
 
-浏览器打开：
+浏览器访问 `http://localhost:5173`。
 
-```text
-http://localhost:5173
-```
+### Demo Accounts
 
-默认端口：
+| Username | Password | User ID |
+| --- | --- | ---: |
+| `alice` | `password123` | 1001 |
+| `bob` | `password123` | 1002 |
+| `charlie` | `password123` | 1003 |
 
-- HTTP: `8080`
-- Netty TCP: `9000`
-- MySQL: `3307`
-- Redis: `6380`
-- RabbitMQ: `5672`
-- RabbitMQ Management: `15672`
+### Multi-node Demo
 
-本地启动两个 IM Server 示例：
+两个实例共享 MySQL、Redis 和 RabbitMQ，只改变 Server ID 和 HTTP/TCP 端口：
 
-```text
-# terminal 1
+```powershell
+# Server 1
 $env:IM_SERVER_ID="im-server-1"
 $env:IM_HTTP_PORT="8080"
 $env:IM_NETTY_PORT="9000"
 mvn spring-boot:run
 
-# terminal 2
+# Server 2
 $env:IM_SERVER_ID="im-server-2"
 $env:IM_HTTP_PORT="8081"
 $env:IM_NETTY_PORT="9002"
 mvn spring-boot:run
 ```
 
-前端默认连接 `http://localhost:8080`。需要连接第二个后端时，可以设置：
+### Tests and Load Test
 
-```text
+```powershell
+mvn "-Dmaven.repo.local=.m2/repository" test
 cd frontend
-$env:VITE_API_BASE_URL="http://localhost:8081"
-$env:VITE_WS_URL="ws://localhost:8081/ws/im"
-npm run dev
+npm run build
 ```
 
-登录测试：
+真实 TCP 压测客户端：
 
-```text
-Invoke-RestMethod -Method Post `
-  -Uri http://localhost:8080/api/auth/login `
-  -ContentType 'application/json' `
-  -Body '{"username":"alice","password":"password123"}'
+```powershell
+.\tools\load-test\run.ps1 --mode=connections --connections=50 --duration=30 --warmup=5
 ```
 
-Web 聊天测试：
+详细参数见 [tools/load-test/README.md](tools/load-test/README.md)。
 
-1. 浏览器窗口 A 登录 `alice / password123`
-2. 浏览器窗口 B 或无痕窗口登录 `bob / password123`
-3. Alice 选择 Bob，发送 `hello bob`
-4. Bob 页面实时出现 Alice 的消息
-5. Bob 回复 `hello alice`
-6. Alice 页面实时收到 Bob 的消息
-7. 关闭 Bob 页面后，Alice 继续发送消息
-8. Bob 重新登录后，CONNECT_ACK 之后会自动同步已知 Conversation 的缺失消息
-9. 同步中的消息按 sequence 排序，重复的 PUSH/SYNC messageId 不会重复展示
+## Design Trade-offs
 
-当前 Phase 2/3 的 Netty 验证主要通过集成测试完成：测试会启动真实 Netty
-客户端，完成登录、CONNECT、SEND_MESSAGE、SEND_RESULT、PUSH_MESSAGE 和
-数据库断言。正式 CLI 客户端仍未提供。
+- **Netty**：适合长连接和 EventLoop 驱动的非阻塞 I/O。
+- **Protobuf**：TCP 使用明确 schema 和二进制编码，WebSocket 只负责浏览器适配。
+- **MySQL**：作为长期消息历史和 Message Truth Source。
+- **Redis**：只保存 Route、Sequence 和短期 transient state，不保存长期消息历史。
+- **RabbitMQ**：只负责跨节点实时 Transport，不作为消息数据库。
+- **At-Least-Once**：网络重试存在重复窗口，因此使用 ACK、Retry、Dedup 和 SYNC，
+  不宣称 Exactly Once。
 
-## 如何测试
+## Known Limitations
 
-```text
-mvn test
-```
+- 性能数据是本地/双节点工程基线，不是生产级压测结果。
+- 正式网络丢包、RabbitMQ Broker 崩溃重放、MySQL 中途 kill 尚未完成。
+- 多节点 Pending ACK 尚未实现严格的多 Worker Claim Lock。
+- Server Crash 后未做复杂的 Pending ACK 自动 failover，最终依靠 Sequence Sync。
+- Web 客户端使用 localStorage 游标，尚未使用 IndexedDB。
+- Demo 密码使用 `{noop}` 种子数据，不适合生产环境。
+- 群聊面向小规模群，不声称支持万人群。
+- 尚未集成 Prometheus、Grafana 等生产观测平台。
 
-Phase 3 测试覆盖：
+## References
 
-- Protobuf `MessageEnvelope` 序列化/反序列化
-- `PING` 产生 `PONG`
-- Spring Boot 上下文启动时自动启动 Netty server
-- JWT 生成、校验和过期拒绝
-- 登录成功和密码错误拒绝
-- 未 CONNECT 先发送业务消息会被拒绝
-- CONNECT 成功后绑定 `userId + deviceId` Session
-- 相同设备重复登录会替换旧 Channel
-- 两个用户通过真实 HTTP 登录，再通过真实 Netty 客户端 CONNECT 和心跳
-- Channel 关闭后 Session 会被清理
-- Alice 给 Bob 发送单聊，Bob 收到 `PUSH_MESSAGE`
-- 消息写入数据库，senderId 从 Session 获取
-- 重复 `clientMessageId` 只产生一条消息并返回原结果
-- 两个方向并发首次发消息只创建一个 Conversation
-- Conversation sequence 递增
-- Bob 离线时消息仍然落库
-- Bob 多设备同时在线时每个设备都收到 Push
-- 未 CONNECT 的客户端无法发送消息
-- TCP 接收方 `MESSAGE_ACK` 后 Pending ACK 被删除
-- TCP ACK 丢失时服务端会超时重投，重投后 ACK 会停止继续重投
-- 重复 ACK 不报错
-- Bob 断线后停止在线重试
-- `SEND_RESULT` 与接收方 `MESSAGE_ACK` 语义独立
-- 同一用户多个 deviceId 独立维护 Pending ACK
-- WebSocket `MESSAGE_ACK` 复用同一套 ACK 服务
-- Bob 离线期间 Alice 发送消息，Bob 重连后通过 TCP `SYNC_REQUEST` 恢复
-- SYNC 分页、`hasMore`、`nextSequence` 和超过最大 limit 的限制
-- 非成员、非法 sequence、非法 limit 不能读取 Conversation 历史
-- WebSocket `SYNC_REQUEST` 复用同一套 `SyncService`
-- Redis route 注册、刷新、TTL 过期和 owner 条件删除
-- Server heartbeat 注册和过期 server 清理
-- CONNECT / PING / disconnect 会创建、恢复和删除 Redis route
-- 同一 `userId + deviceId` 新连接不会被旧连接断开事件误删 route
-- `ConnectionLocator` 可以区分本机、远端和离线连接
-
-## 当前限制
-
-- 登录密码当前使用 `{noop}` 种子数据，`{pbkdf2}` 校验能力已预留，后续需要提供注册或管理脚本生成安全密码
-- 本机 Channel 仍由单进程 `SessionManager` 保存；Redis route 只保存跨节点在线位置
-- Phase 3 集成测试使用 H2 MySQL mode；生产运行配置仍使用 MySQL
-- Web 前端使用固定 Demo User List，不是好友系统
-- 压测客户端位于 `tools/load-test/`，用于阶段性验证，不属于正式业务模块
-- 仍未实现严格的多节点 Pending ACK claim 互斥，当前以单次投递 ownership + 客户端去重为主
-- 仍未提供生产级观测平台和指标上报，性能数据目前依赖本地压测脚本和终端结果
-
-## 性能与故障验证
-
-实际压测和故障注入记录见：
-
-- [docs/performance.md](docs/performance.md)
-- [docs/failure-testing.md](docs/failure-testing.md)
-- 当前 CLI 客户端尚未提供
-- Redis Pending ACK 尚未实现多 Worker Claim Lock；当前通过 `ownerServerId` 做节点归属，
-  同一 owner 默认只运行一个 retry scanner
-- Server Registry 离线节点的 Pending ACK 不做自动 failover，依赖重连后的 Sequence Sync
-- 前端自动同步的 Conversation 列表来自本地 localStorage，第一次打开未知 Conversation
-  不会自动发现全部历史会话
-
-## TODO
-
-- Phase 10: 性能、压测和多 Worker claim 机制
-
-## 参考说明
-
-WildfireChat 参考清单和差异说明记录在
-`docs/wildfirechat-reference.md`。
+WildfireChat 仅作为架构学习参考。文件位置、设计观察、许可证边界和实现差异见
+[docs/wildfirechat-reference.md](docs/wildfirechat-reference.md)。
+本项目没有复用 WildfireChat 的实现文件。
