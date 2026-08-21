@@ -59,6 +59,22 @@ class ConnectionLocatorTest {
                 .doesNotThrowAnyException();
     }
 
+    @Test
+    void locateUserDevicesShouldNotRepeatRouteLookupForEachDevice() {
+        ServerProperties properties = properties("phase7-server-1");
+        CountingRouteRegistry routeRegistry = new CountingRouteRegistry();
+        SessionManager sessionManager = new SessionManager();
+        ConnectionLocator locator = new ConnectionLocator(routeRegistry, sessionManager, properties);
+
+        sessionManager.bind(970013L, "web", new FakeConnection("local-conn"));
+        routeRegistry.register(new ConnectionRoute(970013L, "web", "phase7-server-1", "local-conn", now()));
+        routeRegistry.register(new ConnectionRoute(970013L, "pc", "phase7-server-2", "remote-conn", now()));
+
+        assertThat(locator.locateUserDevices(970013L)).hasSize(2);
+        assertThat(routeRegistry.findCalls).isZero();
+        assertThat(routeRegistry.findUserDevicesCalls).isEqualTo(1);
+    }
+
     private ServerProperties properties(String serverId) {
         ServerProperties properties = new ServerProperties();
         properties.setId(serverId);
@@ -132,6 +148,24 @@ class ConnectionLocatorTest {
             return routes.stream()
                     .filter(item -> item.userId().equals(userId))
                     .toList();
+        }
+    }
+
+    private static class CountingRouteRegistry extends FakeRouteRegistry {
+
+        private int findCalls;
+        private int findUserDevicesCalls;
+
+        @Override
+        public Optional<ConnectionRoute> find(Long userId, String deviceId) {
+            findCalls++;
+            return super.find(userId, deviceId);
+        }
+
+        @Override
+        public List<ConnectionRoute> findUserDevices(Long userId) {
+            findUserDevicesCalls++;
+            return super.findUserDevices(userId);
         }
     }
 

@@ -13,6 +13,7 @@ public class AckProperties {
     private List<Long> retryDelaysMillis = new ArrayList<>(List.of(3000L, 3000L, 5000L));
     private long scanIntervalMillis = 1000L;
     private int scanLimit = 100;
+    private int maxRelayHops = 2;
 
     public boolean isRetryEnabled() {
         return retryEnabled;
@@ -52,6 +53,14 @@ public class AckProperties {
 
     public void setScanLimit(int scanLimit) {
         this.scanLimit = scanLimit;
+    }
+
+    public int getMaxRelayHops() {
+        return maxRelayHops;
+    }
+
+    public void setMaxRelayHops(int maxRelayHops) {
+        this.maxRelayHops = maxRelayHops;
     }
 
     public int maxRetryAttempts() {

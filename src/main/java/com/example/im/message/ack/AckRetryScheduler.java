@@ -3,8 +3,14 @@ package com.example.im.message.ack;
 import com.example.im.conversation.service.ConversationService;
 import com.example.im.message.service.MessageService;
 import com.example.im.message.service.SendMessageResult;
+import com.example.im.mq.RemoteMessageRelayEvent;
+import com.example.im.mq.RemoteMessageRelayPublisher;
 import com.example.im.netty.session.ClientConnection;
 import com.example.im.netty.session.SessionManager;
+import com.example.im.route.ConnectionLocation;
+import com.example.im.route.ConnectionLocationType;
+import com.example.im.route.ConnectionLocator;
+import com.example.im.route.ServerProperties;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
@@ -18,6 +24,7 @@ import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
 @ConditionalOnBean(MessageService.class)
@@ -27,23 +34,36 @@ public class AckRetryScheduler {
     private static final Logger log = LoggerFactory.getLogger(AckRetryScheduler.class);
 
     private final PendingAckRepository pendingAckRepository;
+    private final AckService ackService;
     private final MessageService messageService;
     private final SessionManager sessionManager;
     private final AckProperties properties;
     private final ConversationService conversationService;
+    private final ConnectionLocator connectionLocator;
+    private final RemoteMessageRelayPublisher relayPublisher;
+    private final ServerProperties serverProperties;
     private ScheduledExecutorService executor;
+    private final AtomicBoolean shuttingDown = new AtomicBoolean();
 
     public AckRetryScheduler(
             PendingAckRepository pendingAckRepository,
+            AckService ackService,
             MessageService messageService,
             SessionManager sessionManager,
             AckProperties properties,
-            ConversationService conversationService) {
+            ConversationService conversationService,
+            ConnectionLocator connectionLocator,
+            RemoteMessageRelayPublisher relayPublisher,
+            ServerProperties serverProperties) {
         this.pendingAckRepository = pendingAckRepository;
+        this.ackService = ackService;
         this.messageService = messageService;
         this.sessionManager = sessionManager;
         this.properties = properties;
         this.conversationService = conversationService;
+        this.connectionLocator = connectionLocator;
+        this.relayPublisher = relayPublisher;
+        this.serverProperties = serverProperties;
     }
 
     @PostConstruct
@@ -59,12 +79,16 @@ public class AckRetryScheduler {
 
     @PreDestroy
     void stop() {
+        shuttingDown.set(true);
         if (executor != null) {
             executor.shutdownNow();
         }
     }
 
     private void scanSafely() {
+        if (shuttingDown.get()) {
+            return;
+        }
         try {
             scanOnce();
         } catch (Exception exception) {
@@ -72,20 +96,21 @@ public class AckRetryScheduler {
         }
     }
 
-    void scanOnce() {
+    public void scanOnce() {
         List<PendingAck> dueItems = pendingAckRepository.findDue(
                 System.currentTimeMillis(),
-                Math.max(properties.getScanLimit(), 1));
+                Math.max(properties.getScanLimit(), 1),
+                serverProperties.getId());
         for (PendingAck pendingAck : dueItems) {
             retry(pendingAck);
         }
     }
 
     private void retry(PendingAck pendingAck) {
-        Optional<ClientConnection> connection = sessionManager.findConnection(
+        ConnectionLocation location = connectionLocator.locate(
                 pendingAck.userId(),
                 pendingAck.deviceId());
-        if (connection.isEmpty()) {
+        if (location.type() == ConnectionLocationType.OFFLINE) {
             pendingAckRepository.remove(pendingAck.userId(), pendingAck.deviceId(), pendingAck.messageId());
             log.info("message retry stopped because device is offline messageId={} userId={} deviceId={} attempt={}",
                     pendingAck.messageId(), pendingAck.userId(), pendingAck.deviceId(), pendingAck.attempt());
@@ -107,24 +132,102 @@ public class AckRetryScheduler {
             return;
         }
 
-        int nextAttempt = pendingAck.attempt() + 1;
-        connection.get().sendPush(message.get());
-        log.info("message retry messageId={} userId={} deviceId={} attempt={}",
-                pendingAck.messageId(), pendingAck.userId(), pendingAck.deviceId(), nextAttempt);
-
-        if (nextAttempt >= properties.maxRetryAttempts()) {
-            pendingAckRepository.remove(pendingAck.userId(), pendingAck.deviceId(), pendingAck.messageId());
-            log.info("message retry exhausted messageId={} userId={} deviceId={} attempt={}",
-                    pendingAck.messageId(), pendingAck.userId(), pendingAck.deviceId(), nextAttempt);
+        if (location.type() == ConnectionLocationType.REMOTE) {
+            handoffRemote(pendingAck, message.get(), location);
             return;
         }
 
-        long nextRetryAt = System.currentTimeMillis() + properties.delayForAttempt(nextAttempt);
+        retryLocal(pendingAck, message.get(), location);
+    }
+
+    private void handoffRemote(
+            PendingAck pendingAck,
+            SendMessageResult message,
+            ConnectionLocation location) {
+        int nextAttempt = pendingAck.attempt() + 1;
+        int nextHopCount = pendingAck.hopCount() + 1;
+        if (nextHopCount > Math.max(properties.getMaxRelayHops(), 0)) {
+            pendingAckRepository.remove(pendingAck.userId(), pendingAck.deviceId(), pendingAck.messageId());
+            log.warn("delivery relay exhausted messageId={} deliveryId={} userId={} deviceId={} ownerServerId={} targetServerId={} attempt={} hopCount={}",
+                    pendingAck.messageId(), pendingAck.deliveryId(), pendingAck.userId(), pendingAck.deviceId(),
+                    serverProperties.getId(), location.route().serverId(), nextAttempt, nextHopCount);
+            return;
+        }
+        String deliveryId = pendingAck.deliveryId() == null
+                ? RemoteMessageRelayEvent.stableDeliveryId(
+                message, pendingAck.userId(), pendingAck.deviceId())
+                : pendingAck.deliveryId();
+        boolean published = relayPublisher.publish(
+                message,
+                location.route(),
+                deliveryId,
+                nextAttempt,
+                nextHopCount);
+        if (published) {
+            pendingAckRepository.remove(
+                    pendingAck.userId(),
+                    pendingAck.deviceId(),
+                    pendingAck.messageId());
+            log.info("delivery migrated messageId={} deliveryId={} userId={} deviceId={} ownerServerId={} targetServerId={} attempt={} hopCount={}",
+                    pendingAck.messageId(), deliveryId, pendingAck.userId(), pendingAck.deviceId(),
+                    serverProperties.getId(), location.route().serverId(), nextAttempt, nextHopCount);
+            return;
+        }
+        rescheduleWithoutAttempt(pendingAck);
+    }
+
+    private void retryLocal(
+            PendingAck pendingAck,
+            SendMessageResult message,
+            ConnectionLocation location) {
+        int nextAttempt = pendingAck.attempt() + 1;
+        try {
+            location.connection().sendPush(message);
+            String deliveryId = pendingAck.deliveryId() == null
+                    ? RemoteMessageRelayEvent.stableDeliveryId(
+                    message, pendingAck.userId(), pendingAck.deviceId())
+                    : pendingAck.deliveryId();
+            if (nextAttempt >= properties.maxRetryAttempts()) {
+                pendingAckRepository.remove(
+                        pendingAck.userId(),
+                        pendingAck.deviceId(),
+                        pendingAck.messageId());
+                log.info("message retry exhausted messageId={} deliveryId={} userId={} deviceId={} attempt={}",
+                        pendingAck.messageId(), deliveryId, pendingAck.userId(), pendingAck.deviceId(), nextAttempt);
+                return;
+            }
+            ackService.recordPush(
+                    message,
+                    pendingAck.userId(),
+                    pendingAck.deviceId(),
+                    location.route().connectionId(),
+                    location.route().serverId(),
+                    deliveryId,
+                    nextAttempt,
+                    pendingAck.hopCount());
+            log.info("delivery retry messageId={} deliveryId={} userId={} deviceId={} ownerServerId={} attempt={} hopCount={}",
+                    pendingAck.messageId(), deliveryId, pendingAck.userId(), pendingAck.deviceId(),
+                    serverProperties.getId(), nextAttempt, pendingAck.hopCount());
+        } catch (Exception exception) {
+            log.warn("message retry failed messageId={} deliveryId={} userId={} deviceId={} attempt={}",
+                    pendingAck.messageId(), pendingAck.deliveryId(), pendingAck.userId(), pendingAck.deviceId(),
+                    nextAttempt, exception);
+            rescheduleWithoutAttempt(pendingAck);
+        }
+    }
+
+    private void rescheduleWithoutAttempt(PendingAck pendingAck) {
+        long nextRetryAt = System.currentTimeMillis()
+                + properties.delayForAttempt(pendingAck.attempt());
         pendingAckRepository.save(new PendingAck(
                 pendingAck.userId(),
                 pendingAck.deviceId(),
                 pendingAck.messageId(),
                 nextRetryAt,
-                nextAttempt));
+                pendingAck.attempt(),
+                pendingAck.connectionId(),
+                pendingAck.ownerServerId(),
+                pendingAck.deliveryId(),
+                pendingAck.hopCount()));
     }
 }

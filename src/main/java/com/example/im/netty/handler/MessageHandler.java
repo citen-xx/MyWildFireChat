@@ -91,7 +91,11 @@ public class MessageHandler extends SimpleChannelInboundHandler<MessageEnvelope>
                     request.getMessageType());
             SendMessageResult result = messageService.sendMessage(session.userId(), command);
             context.writeAndFlush(ProtocolMessageFactory.sendResult(envelope.getRequestId(), result));
-            deliveryService.pushToUserDevices(result, messageService.deliveryTargets(session.userId(), command, result));
+            if (!result.duplicate()) {
+                deliveryService.pushToUserDevices(
+                        result,
+                        messageService.deliveryTargets(session.userId(), command, result));
+            }
         } catch (IllegalArgumentException exception) {
             context.writeAndFlush(ProtocolMessageFactory.error(
                     envelope.getRequestId(),
@@ -119,7 +123,11 @@ public class MessageHandler extends SimpleChannelInboundHandler<MessageEnvelope>
                 return;
             }
             MessageAck ack = MessageAck.parseFrom(envelope.getPayload());
-            ackService.acknowledge(session.userId(), session.deviceId(), ack.getMessageId());
+            ackService.acknowledge(
+                    session.userId(),
+                    session.deviceId(),
+                    ack.getMessageId(),
+                    session.connectionId());
         } catch (IllegalArgumentException exception) {
             context.writeAndFlush(ProtocolMessageFactory.error(
                     envelope.getRequestId(),

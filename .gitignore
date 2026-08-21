@@ -1,5 +1,9 @@
 target/
 .m2/
+tools/load-test/out/
+tools/load-test/classpath.txt
+benchmark-results/
+.m2/
 .idea/
 *.iml
 .codex-maven-settings.xml

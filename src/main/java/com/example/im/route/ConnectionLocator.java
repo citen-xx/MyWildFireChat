@@ -31,14 +31,36 @@ public class ConnectionLocator {
 
     public ConnectionLocation locate(Long userId, String deviceId) {
         Optional<ConnectionRoute> route = routeRegistry.find(userId, deviceId);
-        Optional<ClientConnection> localConnection = sessionManager.findConnection(userId, deviceId);
-        if (route.isEmpty()) {
-            return localConnection
-                    .map(connection -> ConnectionLocation.local(localRoute(userId, deviceId, connection), connection))
-                    .orElseGet(ConnectionLocation::offline);
-        }
+        return route.map(connectionRoute -> locateFromRoute(connectionRoute, userId, deviceId))
+                .orElseGet(() -> sessionManager.findConnection(userId, deviceId)
+                        .map(connection -> ConnectionLocation.local(localRoute(userId, deviceId, connection), connection))
+                        .orElseGet(ConnectionLocation::offline));
+    }
 
-        ConnectionRoute currentRoute = route.get();
+    public List<ConnectionLocation> locateUserDevices(Long userId) {
+        Map<String, ConnectionLocation> locations = new LinkedHashMap<>();
+        for (ConnectionRoute route : routeRegistry.findUserDevices(userId)) {
+            locations.put(route.deviceId(), locateFromRoute(route, route.userId(), route.deviceId()));
+        }
+        for (ActiveClientSession localSession : sessionManager.findUserSessionConnections(userId)) {
+            locations.putIfAbsent(localSession.key().deviceId(), ConnectionLocation.local(
+                    localRoute(userId, localSession.key().deviceId(), localSession.connection()),
+                    localSession.connection()));
+        }
+        return new ArrayList<>(locations.values());
+    }
+
+    private ConnectionRoute localRoute(Long userId, String deviceId, ClientConnection connection) {
+        return new ConnectionRoute(
+                userId,
+                deviceId,
+                properties.getId(),
+                connection.id(),
+                Instant.now().toEpochMilli());
+    }
+
+    private ConnectionLocation locateFromRoute(ConnectionRoute currentRoute, Long userId, String deviceId) {
+        Optional<ClientConnection> localConnection = sessionManager.findConnection(userId, deviceId);
         if (!properties.getId().equals(currentRoute.serverId())) {
             return ConnectionLocation.remote(currentRoute);
         }
@@ -57,27 +79,5 @@ public class ConnectionLocator {
         log.info("route stale serverId={} userId={} deviceId={} connectionId={}",
                 properties.getId(), userId, deviceId, currentRoute.connectionId());
         return ConnectionLocation.offline();
-    }
-
-    public List<ConnectionLocation> locateUserDevices(Long userId) {
-        Map<String, ConnectionLocation> locations = new LinkedHashMap<>();
-        for (ConnectionRoute route : routeRegistry.findUserDevices(userId)) {
-            locations.put(route.deviceId(), locate(userId, route.deviceId()));
-        }
-        for (ActiveClientSession localSession : sessionManager.findUserSessionConnections(userId)) {
-            locations.putIfAbsent(localSession.key().deviceId(), ConnectionLocation.local(
-                    localRoute(userId, localSession.key().deviceId(), localSession.connection()),
-                    localSession.connection()));
-        }
-        return new ArrayList<>(locations.values());
-    }
-
-    private ConnectionRoute localRoute(Long userId, String deviceId, ClientConnection connection) {
-        return new ConnectionRoute(
-                userId,
-                deviceId,
-                properties.getId(),
-                connection.id(),
-                Instant.now().toEpochMilli());
     }
 }

@@ -34,8 +34,34 @@ public class InMemoryPendingAckRepository implements PendingAckRepository {
     }
 
     @Override
+    public List<PendingAck> findDue(long nowMillis, int limit, String ownerServerId) {
+        return pending.values().stream()
+                .filter(item -> item.nextRetryAtMillis() <= nowMillis)
+                .filter(item -> ownerServerId == null
+                        || ownerServerId.isBlank()
+                        || item.ownerServerId() == null
+                        || item.ownerServerId().isBlank()
+                        || ownerServerId.equals(item.ownerServerId()))
+                .sorted(Comparator.comparingLong(PendingAck::nextRetryAtMillis))
+                .limit(limit)
+                .toList();
+    }
+
+    @Override
     public boolean exists(Long userId, String deviceId, String messageId) {
         return pending.containsKey(key(userId, deviceId, messageId));
+    }
+
+    @Override
+    public void removeIfConnection(Long userId, String deviceId, String messageId, String connectionId) {
+        String key = key(userId, deviceId, messageId);
+        pending.computeIfPresent(key, (ignored, current) -> {
+            if (connectionId == null || connectionId.isBlank()
+                    || connectionId.equals(current.connectionId())) {
+                return null;
+            }
+            return current;
+        });
     }
 
     @Override

@@ -412,8 +412,16 @@ class Phase8RabbitMqRelayIntegrationTest {
                 SessionManager sessionManager,
                 AckService ackService,
                 RelayDeliveryDeduplicator deduplicator,
-                ServerProperties serverProperties) {
-            return new RabbitMqRemoteMessageRelayListener(sessionManager, ackService, deduplicator, serverProperties);
+                ServerProperties serverProperties,
+                AckProperties ackProperties) {
+            return new RabbitMqRemoteMessageRelayListener(
+                    sessionManager,
+                    ackService,
+                    deduplicator,
+                    serverProperties,
+                    new ConnectionLocator(new NoopRouteRegistry(), sessionManager, serverProperties),
+                    new com.example.im.mq.NoopRemoteMessageRelayPublisher(),
+                    ackProperties);
         }
     }
 }

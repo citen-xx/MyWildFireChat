@@ -156,7 +156,11 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
                     "conversationId", result.conversationId(),
                     "sequence", result.sequence(),
                     "createdAt", result.createdAt()));
-            deliveryService.pushToUserDevices(result, messageService.deliveryTargets(imSession.userId(), command, result));
+            if (!result.duplicate()) {
+                deliveryService.pushToUserDevices(
+                        result,
+                        messageService.deliveryTargets(imSession.userId(), command, result));
+            }
         } catch (IllegalArgumentException exception) {
             connection.sendJson("ERROR", requestId, Map.of(
                     "code", "INVALID_SEND_MESSAGE",
@@ -174,7 +178,11 @@ public class ImWebSocketHandler extends TextWebSocketHandler {
             JsonNode payload,
             String requestId) {
         try {
-            ackService.acknowledge(imSession.userId(), imSession.deviceId(), text(payload, "messageId"));
+            ackService.acknowledge(
+                    imSession.userId(),
+                    imSession.deviceId(),
+                    text(payload, "messageId"),
+                    imSession.connectionId());
         } catch (IllegalArgumentException exception) {
             connection.sendJson("ERROR", requestId, Map.of(
                     "code", "INVALID_MESSAGE_ACK",
